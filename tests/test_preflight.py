@@ -77,7 +77,9 @@ esac''')
     def preflight(self, *arguments, kernel=KERNEL, display=':0'):
         env = dict(os.environ, PATH=str(self.bin),
                    RCLOL_PREFLIGHT_KERNEL_RELEASE=kernel,
-                   RCLOL_PREFLIGHT_SOURCE=str(Path(self.tmp.name) / 'not fetched'))
+                   RCLOL_PREFLIGHT_SOURCE=str(Path(self.tmp.name) / 'not fetched'),
+                   RCLOL_PREFLIGHT_INCLUDE_DIRS=str(Path(self.tmp.name) / 'include'),
+                   RCLOL_PREFLIGHT_LIBRARY_DIRS=str(Path(self.tmp.name) / 'lib'))
         if display is None:
             env.pop('DISPLAY', None)
         else:
@@ -206,6 +208,36 @@ esac''')
         self.assertIn('FAIL darling-dev', result.stdout)
         self.assertIn('missing libtiff-4', result.stdout)
         self.assertIn('libtiff-dev', result.stdout)
+
+    def stub_pkg_config_without_libgif(self):
+        self.stub('pkg-config', '''case "$*" in
+ "--modversion fuse") echo 2.9.9;;
+ "--modversion libgif") exit 1;;
+ "--modversion "*) echo 1.0.0;;
+ *) exit 1;;
+esac''')
+
+    def test_giflib_without_pkg_config_file_passes_on_header_and_library(self):
+        # nixpkgs giflib ships no libgif.pc; Darling's FindGIF needs only these.
+        self.stub_pkg_config_without_libgif()
+        include = Path(self.tmp.name) / 'include'
+        lib = Path(self.tmp.name) / 'lib'
+        include.mkdir()
+        lib.mkdir()
+        (include / 'gif_lib.h').write_text('')
+        (lib / 'libgif.so').write_text('')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('libgif=header+library', result.stdout)
+
+    def test_giflib_missing_header_still_fails(self):
+        self.stub_pkg_config_without_libgif()
+        lib = Path(self.tmp.name) / 'lib'
+        lib.mkdir()
+        (lib / 'libgif.so').write_text('')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('missing libgif', result.stdout)
 
 
     def test_missing_runtime_x11_xcb_headers_stop_before_install(self):
