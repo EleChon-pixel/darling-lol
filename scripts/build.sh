@@ -5,6 +5,8 @@ cd "$repo"
 # Refuse before the long fetch and build when the host cannot build or run the result.
 # Runs before configure.py so an old interpreter gets this message, not a traceback.
 [ "${RCLOL_SKIP_PREFLIGHT:-0}" = 1 ] || python3 scripts/preflight.py
+python3 tools/prepare-toolchain.py
+PATH="$repo/build/toolchain/bin:$PATH"; export PATH
 python3 scripts/configure.py
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 python3 scripts/prepare.py

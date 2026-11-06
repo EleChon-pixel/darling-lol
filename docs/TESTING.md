@@ -1,5 +1,10 @@
 # Testing on another PC
 
+Cross-distribution source qualification and the fresh-install release gate are
+documented in [QUALIFICATION.md](QUALIFICATION.md). The qualification report
+records the exact repository/patch identity and evidence digests; it never logs
+in, stores credentials or automates gameplay.
+
 Run standalone probes and offline mocks; launch and play matches manually. Do not attach a debugger, query client APIs, inject diagnostic client/game hooks or automate input. Do not stop a running client/game to test a runtime change. Presentation probes should use their own windows with clients closed, since the native presentation fixtures use shared per-user target names.
 
 ## Patch and offline checks

@@ -35,6 +35,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import doctor  # noqa: E402  (same directory as this script)
+import qualify  # noqa: E402  (same directory as this script)
 
 LOG_TAIL_LINES = 4000
 KERNEL_PATTERN = re.compile(
@@ -251,8 +252,89 @@ def default_launch_log(env):
     return next((path for path in candidates if path.is_file()), candidates[0])
 
 
+def qualification_report_path(env):
+    """Newest explicit/default qualification report, without scanning the home tree."""
+    candidates = []
+    explicit = env.get('RCLOL_QUALIFICATION_REPORT')
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    workspace = env.get('DARLING_WORKSPACE')
+    if workspace:
+        candidates.extend([
+            Path(workspace) / 'build/qualification/report.json',
+            Path(workspace) / 'build/qualification/latest/report.json',
+        ])
+    root = Path(__file__).resolve().parents[1]
+    candidates.extend([
+        root / 'build/qualification/report.json',
+        root / 'build/qualification/latest/report.json',
+    ])
+    existing = [path for path in candidates if path.is_file()]
+    return max(existing, key=lambda path: path.stat().st_mtime) if existing else None
+
+
+def read_qualification(path):
+    if not path:
+        return None
+    try:
+        report = qualify.load_report(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    # Notes and local command arguments are unnecessary in a crash bundle. Keep
+    # phase results and evidence digests, which are enough to correlate a run.
+    public = {key: report[key] for key in (
+        'schema', 'tool', 'id', 'created', 'updated', 'mode', 'host',
+        'repository', 'client_version') if key in report}
+    public['phases'] = {}
+    for phase, result in report.get('phases', {}).items():
+        public['phases'][phase] = {key: result[key] for key in (
+            'status', 'source', 'started', 'finished', 'evidence') if key in result}
+    return public
+
+
+def classify_phase(facts, rows, qualification=None, override=None):
+    """Best available failure phase, with its evidence source made explicit."""
+    if override:
+        return {'id': override, 'status': 'observed', 'source': 'operator',
+                'message': 'Phase supplied when the report was created'}
+    if qualification:
+        failed = [(result.get('finished', ''), phase) for phase, result
+                  in qualification.get('phases', {}).items() if result.get('status') == 'fail']
+        if failed:
+            phase = max(failed)[1]
+            return {'id': phase, 'status': 'fail', 'source': 'qualification',
+                    'message': 'Latest failed qualification checkpoint'}
+        passed = [phase for phase in qualify.PHASES
+                  if qualification.get('phases', {}).get(phase, {}).get('status') == 'pass']
+        if passed:
+            last = passed[-1]
+            index = qualify.PHASES.index(last)
+            next_phase = qualify.PHASES[index + 1] if index + 1 < len(qualify.PHASES) else last
+            return {'id': next_phase, 'status': 'unverified', 'source': 'qualification',
+                    'message': 'Last passed checkpoint: %s' % last}
+    arguments = ' '.join(row.get('comm', '') + ' ' + row.get('argv', '') for row in rows)
+    if 'League of Legends' in arguments:
+        phase = 'game_startup'
+        message = 'League game process is present'
+    elif any(name in arguments for name in ('RiotClientServices', 'LeagueClientUx', 'LeagueClient')):
+        phase = 'client_startup'
+        message = 'Riot or League client process is present'
+    elif facts.get('prefix_state', {}).get('state') == 'running':
+        phase = 'runtime_install'
+        message = 'Darling runtime is running without a detected client process'
+    elif facts.get('prefix_exists'):
+        phase = 'client_install'
+        message = 'Darling prefix exists; no runtime or client process is present'
+    else:
+        phase = 'preflight'
+        message = 'No installed prefix was detected'
+    return {'id': phase, 'status': 'inferred', 'source': 'process-prefix-state',
+            'message': message}
+
+
 def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_processes=False,
-          proc_root=Path('/proc'), which=None, env=None):
+          proc_root=Path('/proc'), which=None, env=None, qualification_report=None,
+          phase=None):
     """Write the bundle and return its path and manifest."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
@@ -266,6 +348,10 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
     checks = doctor.run_checks(facts)
     rows = process_snapshot(proc_root)
     relevant = relevant_processes(rows)
+    qualification_path = (Path(qualification_report).expanduser()
+                          if qualification_report else qualification_report_path(env))
+    qualification = read_qualification(qualification_path)
+    phase_result = classify_phase(facts, relevant, qualification, phase)
 
     dserver_log = Path(prefix) / 'private/var/log/dserver.log'
     log_text, log_error = read_tail(dserver_log)
@@ -281,6 +367,8 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
         'display.txt': display_state(which, env),
         'coredumps.txt': coredumps(which),
     }
+    if qualification:
+        entries['qualification/report.json'] = json.dumps(qualification, indent=2) + '\n'
     if redact:
         workspace = facts.get('workspace', '')
 
@@ -302,6 +390,8 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
         'redacted': redact,
         'archive': archive.name,
         'doctor': {'summary': doctor.summarize(checks), 'checks': checks},
+        'phase': phase_result,
+        'repository': qualify.repo_state(),
         'processes': {
             'total': len(rows),
             'relevant': len(relevant),
@@ -318,7 +408,9 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
         (root / 'logs').mkdir()
         (root / 'report.json').write_text(json.dumps(manifest, indent=2) + '\n')
         for name, text in entries.items():
-            (root / name).write_text(text)
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
         (root / 'README.txt').write_text(readme(manifest))
         with tarfile.open(archive, 'w:gz') as tar:
             for path in sorted(root.rglob('*')):
@@ -359,6 +451,9 @@ What is inside:
 - logs/kernel.txt: graphics-related kernel messages
 - display.txt: monitors and windows (or an explanation when unavailable)
 - coredumps.txt: recent systemd-coredump entries, if any
+- qualification/report.json: phase results and evidence digests, when available
+
+Failure phase: %(phase)s (%(phase_source)s)
 
 Environment variables are not collected. Credentials in command-line arguments
 (--token, --password, URL userinfo) are masked. Home directory, user name and
@@ -372,6 +467,8 @@ host name are replaced with placeholders unless the bundle was created with
         'prefix': manifest['prefix'],
         'redacted': manifest['redacted'],
         'lines': LOG_TAIL_LINES,
+        'phase': manifest['phase']['id'],
+        'phase_source': manifest['phase']['source'],
     }
 
 
@@ -385,6 +482,10 @@ def main(argv=None):
     parser.add_argument('--label', help='short label added to the file name ([A-Za-z0-9._-])')
     parser.add_argument('--all-processes', action='store_true',
                         help='include every process owned by this user, not only the runtime/client tree')
+    parser.add_argument('--qualification-report', type=Path,
+                        help='qualification report to correlate with this bundle')
+    parser.add_argument('--phase', choices=qualify.PHASES,
+                        help='phase being investigated (otherwise qualification/process state is used)')
     parser.add_argument('--no-redact', action='store_true', help='keep the real home path, user and host name')
     parser.add_argument('--json', action='store_true', help='print the manifest')
     args = parser.parse_args(argv)
@@ -397,6 +498,8 @@ def main(argv=None):
             label=args.label,
             redact=not args.no_redact,
             all_processes=args.all_processes,
+            qualification_report=args.qualification_report,
+            phase=args.phase,
         )
     except ValueError as error:
         parser.error(str(error))

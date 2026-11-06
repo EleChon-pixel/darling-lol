@@ -1,0 +1,61 @@
+name: Qualification source matrix
+
+on:
+  push:
+    paths:
+      - "qualification/**"
+      - "tools/qualify.py"
+      - "tools/crash-report.py"
+      - "tests/**"
+      - "scripts/**"
+      - "patches/**"
+      - ".github/workflows/qualification.yml"
+  pull_request:
+    paths:
+      - "qualification/**"
+      - "tools/qualify.py"
+      - "tools/crash-report.py"
+      - "tests/**"
+      - "scripts/**"
+      - "patches/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            image: ubuntu:24.04
+            install: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 g++ pkg-config libxml2-dev
+          - name: fedora
+            image: fedora:42
+            install: dnf install -y git python3 gcc-c++ pkgconf-pkg-config libxml2-devel
+          - name: arch
+            image: archlinux:base
+            install: pacman -Syu --noconfirm git python gcc pkgconf libxml2
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install source-test dependencies
+        run: ${{ matrix.install }}
+      - uses: actions/checkout@v4
+      - name: Run qualification source phase
+        run: python3 tools/qualify.py run --mode source --output build/qualification-${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-${{ matrix.name }}
+          path: build/qualification-${{ matrix.name }}
+          if-no-files-found: error
+
+  nix-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+      - run: nix build .#checks.x86_64-linux.fonts --no-link -L

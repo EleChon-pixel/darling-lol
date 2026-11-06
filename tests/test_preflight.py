@@ -38,7 +38,17 @@ class PreflightFixture(unittest.TestCase):
 esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         self.stub('llvm-objdump', 'exit 0')
         self.stub('llvm-nm', 'exit 0')
+        self.stub('clang', 'exit 0')
+        self.stub('clang++', 'exit 0')
+        self.stub('ld.lld', 'exit 0')
         self.stub('cmake', 'echo "cmake version 3.31.6"')
+        self.stub('bison', 'exit 0')
+        self.stub('flex', 'exit 0')
+        self.stub('pkg-config', '''case "$*" in
+ "--modversion fuse") echo 2.9.9;;
+ "--modversion "*) echo 1.0.0;;
+ *) exit 1;;
+esac''')
         self.stub('git', 'case "$*" in "lfs version") echo "git-lfs/3.7.0 (GitHub; linux amd64)";; esac')
         self.vulkan([('1.3.289', 'Test GPU', True)])
         self.stub('xdpyinfo', 'exit 0')
@@ -140,12 +150,76 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         self.assertIn('llvm-dev', result.stdout)
 
 
+    def test_versioned_compiler_tools_are_accepted(self):
+        for name in ('clang', 'clang++', 'ld.lld'):
+            (self.bin / name).unlink()
+            self.stub(name + '-23', 'exit 0')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('clang-23', result.stdout)
+        self.assertIn('clang++-23', result.stdout)
+        self.assertIn('ld.lld-23', result.stdout)
+
+
+    def test_missing_versioned_compiler_stops_before_runtime_builds(self):
+        (self.bin / 'clang++').unlink()
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL compiler-tools', result.stdout)
+        self.assertIn('clang++ not found', result.stdout)
+
+
     def test_old_cmake_stops_the_setup(self):
         self.stub('cmake', 'echo "cmake version 3.16.3"')
         result = self.preflight()
         self.assertEqual(result.returncode, 1)
         self.assertIn('FAIL cmake', result.stdout)
         self.assertIn('CMake 3.20', result.stdout)
+
+
+    def test_missing_parser_generator_stops_before_source_checkout(self):
+        (self.bin / 'bison').unlink()
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL generators', result.stdout)
+        self.assertIn('apt install bison flex', result.stdout)
+        self.assertIn('bison not found', result.stdout)
+
+
+    def test_missing_fuse_development_metadata_stops_before_configure(self):
+        (self.bin / 'pkg-config').unlink()
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL fuse-dev', result.stdout)
+        self.assertIn('apt install libfuse-dev', result.stdout)
+
+
+    def test_missing_darling_development_module_stops_before_build(self):
+        self.stub('pkg-config', '''case "$*" in
+ "--modversion fuse") echo 2.9.9;;
+ "--modversion libtiff-4") exit 1;;
+ "--modversion "*) echo 1.0.0;;
+ *) exit 1;;
+esac''')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL darling-dev', result.stdout)
+        self.assertIn('missing libtiff-4', result.stdout)
+        self.assertIn('libtiff-dev', result.stdout)
+
+
+    def test_missing_runtime_x11_xcb_headers_stop_before_install(self):
+        self.stub('pkg-config', '''case "$*" in
+ "--modversion fuse") echo 2.9.9;;
+ "--modversion x11-xcb") exit 1;;
+ "--modversion "*) echo 1.0.0;;
+ *) exit 1;;
+esac''')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL darling-dev', result.stdout)
+        self.assertIn('missing x11-xcb', result.stdout)
+        self.assertIn('libx11-xcb-dev', result.stdout)
 
 
     def test_old_git_lfs_stops_the_setup(self):
@@ -245,8 +319,8 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         report = json.loads(result.stdout)
         self.assertTrue(report['ok'])
         names = {check['check'] for check in report['checks']}
-        self.assertTrue({'python', 'cmake', 'git-lfs', 'lfs-pointer', 'kernel', 'llvm',
-                         'llvm-tools', 'vulkan', 'x11'} <= names)
+        self.assertTrue({'python', 'cmake', 'generators', 'fuse-dev', 'darling-dev', 'git-lfs', 'lfs-pointer', 'kernel', 'llvm',
+                         'llvm-tools', 'compiler-tools', 'vulkan', 'x11'} <= names)
         self.assertTrue(all('required' in check and 'detail' in check for check in report['checks']))
 
 

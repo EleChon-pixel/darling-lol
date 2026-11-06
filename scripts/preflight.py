@@ -27,6 +27,18 @@ MIN_LFS = (2, 13)      # Debian 11 ships 2.13, the oldest release the setup is t
 MIN_KERNEL = (5, 14)   # MADV_POPULATE_WRITE.
 MIN_VULKAN = (1, 3)    # Indium rejects older devices and needs timeline semaphores.
 
+# Host development interfaces consumed by the enabled Darling components.  Keep
+# these names aligned with the pinned source's debian/control and CMake files;
+# pkg-config makes the check portable across distributions and catches missing
+# headers before the multi-hour compile reaches them.
+BUILD_PKG_MODULES = (
+    'cairo', 'fontconfig', 'freetype2', 'libtiff-4', 'libpng', 'libjpeg', 'libgif',
+    'libavcodec', 'libavformat', 'libavutil', 'libswresample', 'libpulse', 'dbus-1',
+    'egl', 'vulkan', 'libxml-2.0', 'x11', 'x11-xcb', 'xcb-shm', 'xext', 'xrandr',
+    'xcursor', 'xkbfile',
+    'libudev', 'libcap', 'libelf', 'libbsd',
+)
+
 SOURCE = Path(os.environ.get('RCLOL_PREFLIGHT_SOURCE') or ROOT / 'build/darling-src')
 POINTER = b'version https://git-lfs.github.com/spec/v1'
 LIBRARY_SUFFIXES = ('.dylib', '.a', '.so', '.o')
@@ -64,6 +76,46 @@ def check_cmake(report):
     found = version(text.splitlines()[0]) if text else None
     report('cmake', found is not None and found >= MIN_CMAKE, dotted(found),
            f'CMake {dotted(MIN_CMAKE)} or newer is required by the configured build.')
+
+
+def check_build_generators(report):
+    """Darling invokes CMake BISON_TARGET/FLEX_TARGET during configuration."""
+    found = {name: shutil.which(name) for name in ('bison', 'flex')}
+    missing = [name for name, path in found.items() if not path]
+    detail = ', '.join(f'{name}={path}' for name, path in found.items() if path) or 'none found'
+    report('generators', not missing, detail,
+           'Install the parser generators before preparing the large source tree '
+           f'(Debian/Ubuntu: `apt install bison flex`): {", ".join(missing)} not found.')
+
+
+def check_fuse_development(report):
+    version_text = output(['pkg-config', '--modversion', 'fuse'])
+    report('fuse-dev', bool(version_text), (version_text or '').strip() or 'pkg-config fuse not found',
+           'Darling DMG support requires the FUSE 2 development metadata '
+           '(Debian/Ubuntu: `apt install libfuse-dev`). FUSE 3 alone does not provide '
+           'the `fuse` pkg-config module requested by this pinned source.')
+
+
+def check_build_development(report):
+    versions = {}
+    missing = []
+    for module in BUILD_PKG_MODULES:
+        version_text = output(['pkg-config', '--modversion', module])
+        if version_text:
+            versions[module] = version_text.strip()
+        else:
+            missing.append(module)
+    detail = ', '.join(f'{name}={versions[name]}' for name in BUILD_PKG_MODULES
+                       if name in versions)
+    if missing:
+        detail = ('missing ' + ', '.join(missing) + ('; found ' + detail if detail else ''))
+    report('darling-dev', not missing, detail or 'no development modules found',
+           'Install the missing Darling development packages before the expensive build. '
+           'On Debian/Ubuntu these include libcairo2-dev libtiff-dev libfreetype-dev '
+           'libfontconfig1-dev libgif-dev libavcodec-dev libavformat-dev libavutil-dev '
+           'libswresample-dev libpulse-dev libdbus-1-dev libxkbfile-dev libudev-dev '
+           'libcap-dev libelf-dev libbsd-dev libx11-xcb-dev libxcb-shm0-dev '
+           'libgl1-mesa-dev libegl1-mesa-dev and libvulkan-dev.')
 
 
 def check_git_lfs(report):
@@ -147,6 +199,16 @@ def check_llvm_tools(report):
            f'Install the LLVM tools package (for example llvm-dev or llvm23-tools): {", ".join(missing)} '
            'not found as an unversioned name, as llvm-<tool>-<N> or in `llvm-config --bindir`. '
            'The runtime install validates Darwin binaries with them.')
+
+
+def check_compiler_tools(report):
+    tools = {name: llvm_tools.find(name) for name in ('clang', 'clang++', 'ld.lld')}
+    missing = [name for name, path in tools.items() if not path]
+    present = ', '.join(f'{name}={path}' for name, path in tools.items() if path)
+    report('compiler-tools', not missing, present or 'none found',
+           f'Install the matching Clang and LLD packages: {", ".join(missing)} not found as '
+           'unversioned names, versioned <name>-<N> executables, or in `llvm-config --bindir`. '
+           'The setup creates local unversioned shims for versioned distro packages.')
 
 
 def gpu_blocks(text):
@@ -272,8 +334,11 @@ def main():
         checks.append({'check': name, 'ok': bool(ok), 'required': required,
                        'detail': detail, 'hint': None if ok else hint})
 
-    for check in (check_python, check_cmake, check_git_lfs, check_lfs_pointers, check_kernel,
-                  check_llvm, check_llvm_tools, check_vulkan, check_display):
+    for check in (check_python, check_cmake, check_build_generators, check_fuse_development,
+                  check_build_development,
+                  check_git_lfs,
+                  check_lfs_pointers, check_kernel,
+                  check_llvm, check_llvm_tools, check_compiler_tools, check_vulkan, check_display):
         check(report)
 
     failed = [check for check in checks if check['required'] and not check['ok']]

@@ -3886,8 +3886,8 @@ index 0000000..9ba30d2
 +
 +extern "C" {
 +#include "dc_codesign.h"
-+#include <darlingserver/dc_entitlements.h>
 +}
++#include <darlingserver/dc_entitlements.h>
 +
 +namespace {
 +	struct CacheKey {

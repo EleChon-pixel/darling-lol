@@ -28,6 +28,7 @@ case "${1:-}" in
   --doctor) shift; host_tool doctor "$@";;
   --report) shift; host_tool crash-report "$@";;
   --perf) shift; host_tool perf-baseline "$@";;
+  --qualify) shift; host_tool qualify "$@";;
 esac
 if [ "${1:-}" = --set-prefix ]; then
   [ $# -eq 2 ] || { echo 'Usage: darling-lol --set-prefix PATH' >&2; exit 2; }

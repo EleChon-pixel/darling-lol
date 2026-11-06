@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "minimum_runs": 2,
+  "minimum_distros": 2,
+  "require_clean_repository": true,
+  "require_same_candidate": true,
+  "required_modes": ["native", "nix"],
+  "required_gpu_groups": [
+    ["amd"],
+    ["intel", "nvidia"]
+  ],
+  "required_phases": [
+    "source",
+    "preflight",
+    "build",
+    "runtime_install",
+    "client_install",
+    "client_startup",
+    "client_restart_1",
+    "client_restart_2",
+    "client_restart_3",
+    "client_update",
+    "shutdown_cleanup"
+  ]
+}

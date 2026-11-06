@@ -25,6 +25,13 @@ If someone else wants to contact me know that i'm open to jobs, part-time remote
 
 A short manual ARAM run and the current compatibility status are documented in [docs/STATUS.md](docs/STATUS.md). Real machines that have played, and their measured frame times, are listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); `darling-lol --doctor` and `darling-lol --perf` produce the data for a new row.
 
+Fresh-install evidence is recorded by `darling-lol --qualify`; the two-host,
+two-install-mode release policy is documented in
+[docs/QUALIFICATION.md](docs/QUALIFICATION.md). A passing qualification gate is
+compatibility evidence for the recorded machines, not an account-safety or
+future-client guarantee. Crash bundles produced by `darling-lol --report` also
+identify the observed, qualified, or explicitly inferred failure phase.
+
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
 This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, ARAM now averages about 118–135 FPS, with the slowest 10-second stretches around 106–119 (the higher figures with Hyprland's direct scanout off; fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows). The effect of the memory changes on client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
@@ -45,7 +52,7 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 - X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.
 
-Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `tools/env-check.sh` provides a starting check; its legacy package names may need adapting to your distro.
+Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `scripts/preflight.py` checks the enabled source tree's required pkg-config development interfaces before the expensive build and reports the corresponding Debian/Ubuntu package names; package names on other distributions differ.
 
 ## Experimental Nix/rootless package
 

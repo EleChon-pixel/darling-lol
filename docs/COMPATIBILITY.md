@@ -8,6 +8,13 @@ work. "Verified" below means the Riot Client opened, League launched, a match
 was played manually, and the store was reachable. Experimental or untested
 hardware is not listed until someone sends a report.
 
+This table remains useful observational evidence, but it is not by itself a
+release gate. Candidate releases use the reproducible reports and diversity
+policy in [QUALIFICATION.md](QUALIFICATION.md): two independent hosts and
+distributions, native plus Nix installation, AMD plus Intel/NVIDIA graphics,
+three clean client restarts, one client update and clean shutdown evidence.
+Passing that policy does not establish account safety or official support.
+
 The project is unofficial and carries account risk. Never test on an account you
 care about, and never play ranked while testing (see the warning in the
 [README](../README.md)).
@@ -21,6 +28,8 @@ darling-lol --doctor                 # host, GPU, Vulkan, session, prefix checks
 darling-lol --doctor --report doctor.json   # same checks as a JSON attachment
 darling-lol --perf                   # frame pacing from the game's own logs
 darling-lol --perf --json            # the same numbers as JSON
+darling-lol --qualify run --mode native --through preflight \
+  --output build/qualification/native
 ```
 
 `darling-lol --doctor` needs no runtime and starts nothing, so it is safe to run

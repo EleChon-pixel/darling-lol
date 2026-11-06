@@ -89,6 +89,27 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(text)
         self.assertIn('No such file', error)
 
+    def test_phase_override_wins(self):
+        result = crash_report.classify_phase({}, [], override='rendering')
+        self.assertEqual(result['id'], 'rendering')
+        self.assertEqual(result['source'], 'operator')
+
+    def test_failed_qualification_phase_wins(self):
+        qualification = {'phases': {
+            'source': {'status': 'pass', 'finished': '2026-11-01T00:00:00Z'},
+            'client_startup': {'status': 'fail', 'finished': '2026-11-02T00:00:00Z'},
+        }}
+        result = crash_report.classify_phase({}, [], qualification=qualification)
+        self.assertEqual(result['id'], 'client_startup')
+        self.assertEqual(result['status'], 'fail')
+
+    def test_process_state_phase_is_explicitly_inferred(self):
+        facts = {'prefix_state': {'state': 'running'}, 'prefix_exists': True}
+        rows = [{'comm': 'RiotClientServices', 'argv': '/Riot Client.app/RiotClientServices'}]
+        result = crash_report.classify_phase(facts, rows)
+        self.assertEqual(result['id'], 'client_startup')
+        self.assertEqual(result['status'], 'inferred')
+
     def test_mask_argv_hides_credentials(self):
         masked = crash_report.mask_argv([
             'RiotClientServices', '--token', 'abc123', '--password=hunter2',

@@ -15,6 +15,8 @@ python3 scripts/configure.py
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 # Check versions before any runtime helper touches the prefix or the running session.
 [ "${RCLOL_SKIP_PREFLIGHT:-0}" = 1 ] || python3 scripts/preflight.py
+python3 tools/prepare-toolchain.py
+PATH="$repo/build/toolchain/bin:$PATH"; export PATH
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
 python3 build/runtime/tools/ensure-darling-runtime.py
 # Initialize the normal user-owned prefix before installing overrides.
