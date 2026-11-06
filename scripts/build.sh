@@ -20,8 +20,16 @@ python3 scripts/prepare.py
 # -mtune=generic, not native: clang 23 tuning for AMD Zen (znver*) passes the thread-local
 # variable descriptor in the wrong register on Darwin targets, so every __thread access
 # returns NULL (launchd crashed in libkqueue's epoll_event_dump).
-cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
-  -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
+# Pin LLVM_DIR to the llvm-config on PATH every time. A cached LLVM_DIR from an
+# earlier toolchain survives a compiler upgrade and makes Indium mix headers and
+# library from different LLVM majors (or fail to configure).
+set --
+llvm_cmake_dir=$(llvm-config --cmakedir 2>/dev/null || true)
+if [ -n "$llvm_cmake_dir" ] && [ -d "$llvm_cmake_dir" ]; then
+  set -- "-DLLVM_DIR=$llvm_cmake_dir"
+fi
+cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' "$@" \
+  -DCMAKE_BUILD_TYPE=-DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
   -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
   -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
 cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
