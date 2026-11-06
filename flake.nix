@@ -10,7 +10,9 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      llvmPackages = pkgs.llvmPackages_21;
+      # Iridium/Indium (Metal shaders) are tested with LLVM 22/23 and the LLVM C
+      # API enum values change between majors; preflight warns on anything older.
+      llvmPackages = pkgs.llvmPackages_22;
 
       # Host /etc/fonts survives buildFHSEnv, but host /usr/share/fonts does
       # not. Use store paths for both text fonts and the standard alias rules.
@@ -127,6 +129,8 @@
         xcbutilrenderutil
         libxkbfile
         libxkbcommon
+        xdpyinfo # preflight display check
+        xdg-user-dirs # guest bootstrap calls xdg-user-dir
 
         # Audio
         pulseaudio
