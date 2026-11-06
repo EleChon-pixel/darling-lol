@@ -83,6 +83,7 @@
         dbus
         libxml2
         openssl
+        openssl.dev # dc-codesign (runtime signing) needs <openssl/evp.h>
         libedit
 
         # Graphics & Display
