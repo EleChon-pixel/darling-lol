@@ -57,6 +57,14 @@ python3 build/runtime/tools/validate-riot-runtime.py
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.
 if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
   if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
+    # Nix's wrapped clang does not search the FHS /usr/include, so point it
+    # at OpenSSL explicitly when pkg-config knows where libcrypto lives.
+    ssl_include=$(pkg-config --variable=includedir libcrypto 2>/dev/null || true)
+    ssl_lib=$(pkg-config --variable=libdir libcrypto 2>/dev/null || true)
+    if [ -n "$ssl_include" ] && [ -n "$ssl_lib" ]; then
+      CPATH="$ssl_include${CPATH:+:$CPATH}"; LIBRARY_PATH="$ssl_lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+      export CPATH LIBRARY_PATH
+    fi
     make -s -C "$repo/tools/dc-codesign" dc-codesign || \
       echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
   fi
