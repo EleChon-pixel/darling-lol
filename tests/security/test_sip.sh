@@ -44,7 +44,7 @@ fi
 cleanup() {
 	rm -f "$prefix/usr/local/sip-inode-link"
 	rm -f "$prefix/private/tmp/sip-link" "$prefix/usr/local/sip-test" "$prefix/private/etc/sip-test"
-	rm -f "$prefix/private/etc/sip-file" "$prefix/private/etc/sip-inode" "$prefix/private/etc/sip-newlink" "$prefix/private/tmp/sip-hardlink" "$prefix/private/tmp/sip-inode-link"
+	rm -f "$prefix/private/etc/sip-file" "$prefix/private/etc/sip-inode" "$prefix/private/etc/sip-newlink" "$prefix/private/etc/sip-fifo" "$prefix/private/etc/sip-node" "$prefix/private/tmp/sip-hardlink" "$prefix/private/tmp/sip-inode-link"
 	rmdir "$prefix/private/etc/sip-newdir" 2>/dev/null || true
 	rm -rf "$tmp"
 	if [ "$started" -eq 1 ]; then
@@ -109,7 +109,7 @@ esac
 
 out=$(run on vfs)
 case "$out" in
-*"SIP_VFS_OK"*) ok "SIP on: chmod/chown/utimes/xattr/truncate/link/symlink/rmdir/fd/mmap and hardlink checks" ;;
+*"SIP_VFS_OK"*) ok "SIP on: chmod/chown/utimes/xattr/extended-attribute/node/truncate/link/symlink/rmdir/fd/mmap and hardlink checks" ;;
 *) bad "SIP on VFS probe: $out" ;;
 esac
 

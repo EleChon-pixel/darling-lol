@@ -8,9 +8,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/attr.h>
 #include <sys/csr.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -48,6 +50,15 @@ static int expect_eperm(const char* label, int rc, int error) {
 static int test_vfs(void) {
 	int failures = 0;
 	int fd, rc, error;
+	filesec_t filesec;
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+	mode_t mode = 0644;
+	struct attrlist attrs = {
+		.bitmapcount = ATTR_BIT_MAP_COUNT,
+		.commonattr = ATTR_CMN_ACCESSMASK,
+	};
+	uint32_t access_mode = 0644;
 
 	rc = chmod("/private/etc", 0755); error = errno;
 	failures += expect_eperm("chmod", rc, error);
@@ -57,6 +68,8 @@ static int test_vfs(void) {
 	failures += expect_eperm("utimes", rc, error);
 	rc = setxattr("/private/etc", "user.sip-test", "x", 1, 0, 0); error = errno;
 	failures += expect_eperm("setxattr", rc, error);
+	rc = removexattr("/private/etc/sip-file", "user.sip-remove", 0); error = errno;
+	failures += expect_eperm("removexattr", rc, error);
 	rc = truncate("/private/etc/sip-file", 0); error = errno;
 	failures += expect_eperm("truncate", rc, error);
 	rc = rmdir("/private/etc"); error = errno;
@@ -79,6 +92,30 @@ static int test_vfs(void) {
 	failures += expect_eperm("futimes", rc, error);
 	rc = fsetxattr(fd, "user.sip-test", "x", 1, 0, 0); error = errno;
 	failures += expect_eperm("fsetxattr", rc, error);
+	rc = fremovexattr(fd, "user.sip-remove", 0); error = errno;
+	failures += expect_eperm("fremovexattr", rc, error);
+
+	filesec = filesec_init();
+	if (filesec == NULL ||
+	    filesec_set_property(filesec, FILESEC_OWNER, &uid) != 0 ||
+	    filesec_set_property(filesec, FILESEC_GROUP, &gid) != 0 ||
+	    filesec_set_property(filesec, FILESEC_MODE, &mode) != 0) {
+		printf("VFS_FAIL filesec setup errno=%d\n", errno);
+		failures++;
+	} else {
+		rc = chmodx_np("/private/etc/sip-file", filesec); error = errno;
+		failures += expect_eperm("chmodx_np", rc, error);
+		rc = fchmodx_np(fd, filesec); error = errno;
+		failures += expect_eperm("fchmodx_np", rc, error);
+	}
+	if (filesec != NULL)
+		filesec_free(filesec);
+
+	rc = setattrlist("/private/etc/sip-file", &attrs, &access_mode,
+	    sizeof(access_mode), 0); error = errno;
+	failures += expect_eperm("setattrlist", rc, error);
+	rc = fsetattrlist(fd, &attrs, &access_mode, sizeof(access_mode), 0); error = errno;
+	failures += expect_eperm("fsetattrlist", rc, error);
 	{
 		/* A writable MAP_PRIVATE mapping is copy-on-write and does not
 		 * modify the protected file, so SIP must allow it. */
@@ -100,6 +137,15 @@ static int test_vfs(void) {
 			munmap(mapping, 4096);
 	}
 	close(fd);
+
+	rc = mkfifo("/private/etc/sip-fifo", 0600); error = errno;
+	failures += expect_eperm("mkfifo", rc, error);
+	if (rc == 0)
+		unlink("/private/etc/sip-fifo");
+	rc = mknod("/private/etc/sip-node", S_IFIFO | 0600, 0); error = errno;
+	failures += expect_eperm("mknod", rc, error);
+	if (rc == 0)
+		unlink("/private/etc/sip-node");
 
 	/* Seed the inode registry through the protected path, then prove that a
 	 * pre-existing hardlink outside the protected tree is refused by dev/ino. */
@@ -139,6 +185,11 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	printf("csr_config=0x%08x\n", config);
+	if (config != 0 &&
+	    setxattr("/private/etc/sip-file", "user.sip-remove", "x", 1, 0, 0) != 0) {
+		printf("SIP_FAIL seed-removexattr errno=%d\n", errno);
+		return 1;
+	}
 
 	if (argc > 1 && strcmp(argv[1], "vfs") == 0) {
 		if (config != 0) {

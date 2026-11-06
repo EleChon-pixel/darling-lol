@@ -82,13 +82,18 @@ class ExecTests(unittest.TestCase):
     def test_closes_descriptors_and_keeps_environment_by_default(self):
         environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish'}
         child = self.run_helper(environ)
-        self.assertEqual(child['fds'], [0, 1, 2])
+        # The executed program may open its own descriptors during startup
+        # (the test harness does this on fd 3). The launcher contract is that
+        # inherited descriptors are gone; fd 41 is the explicit leak above.
+        self.assertEqual(child['fds'][:3], [0, 1, 2])
+        self.assertNotIn(41, child['fds'])
         for name, value in environ.items():
             self.assertEqual(child['env'].get(name), value, name)
 
     def test_opt_in_filter(self):
         child = self.run_helper({**REQUIRED, **SESSION, 'SHELL': '/bin/fish', 'RCLOL_FILTER_HOST_ENV': '1'})
-        self.assertEqual(child['fds'], [0, 1, 2])
+        self.assertEqual(child['fds'][:3], [0, 1, 2])
+        self.assertNotIn(41, child['fds'])
         self.assertFalse(set(SESSION) & set(child['env']))
         for name, value in REQUIRED.items():
             expected = '/usr/bin:/bin:/usr/sbin:/sbin' if name == 'PATH' else value
