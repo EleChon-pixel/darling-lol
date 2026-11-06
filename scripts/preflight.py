@@ -96,6 +96,26 @@ def check_fuse_development(report):
            'the `fuse` pkg-config module requested by this pinned source.')
 
 
+# giflib often ships without a pkg-config file (nixpkgs giflib 6.x, older
+# Debian). Darling finds it through CMake's FindGIF, which only looks for the
+# header and library, so accept those when pkg-config has no module.
+PKG_FILE_FALLBACKS = {'libgif': ('gif_lib.h', ('libgif.so',))}
+INCLUDE_DIRS = ('/usr/include', '/usr/local/include')
+LIBRARY_DIRS = ('/usr/lib', '/usr/lib64', '/usr/lib/x86_64-linux-gnu', '/usr/local/lib')
+
+
+def found_without_pkg_config(module):
+    fallback = PKG_FILE_FALLBACKS.get(module)
+    if not fallback:
+        return False
+    header, libraries = fallback
+    include_dirs = os.environ.get('RCLOL_PREFLIGHT_INCLUDE_DIRS', os.pathsep.join(INCLUDE_DIRS))
+    library_dirs = os.environ.get('RCLOL_PREFLIGHT_LIBRARY_DIRS', os.pathsep.join(LIBRARY_DIRS))
+    return (any(Path(d, header).is_file() for d in include_dirs.split(os.pathsep) if d) and
+            any(Path(d, name).exists() for d in library_dirs.split(os.pathsep) if d
+                for name in libraries))
+
+
 def check_build_development(report):
     versions = {}
     missing = []
@@ -103,6 +123,8 @@ def check_build_development(report):
         version_text = output(['pkg-config', '--modversion', module])
         if version_text:
             versions[module] = version_text.strip()
+        elif found_without_pkg_config(module):
+            versions[module] = 'header+library'
         else:
             missing.append(module)
     detail = ', '.join(f'{name}={versions[name]}' for name in BUILD_PKG_MODULES
