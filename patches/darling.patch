@@ -8574,7 +8574,7 @@ index 9a489b386..9fe56cc3f 100644
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
+index 5af5298a..45ae96b3 100644
 --- a/src/libsandbox/src/sandbox.c
 +++ b/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
@@ -8586,113 +8586,119 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,63 +31,103 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
 -void* sandbox_apply(void)
-+/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
-+ * issues/consumes/releases these around sandboxed child setup; without
-+ * enforcement we hand out dummy nonzero tokens and accept everything.
-+ * (These live in libsandbox.dylib on macOS, hence here and not in
-+ * libsystem_sandbox.) */
-+static int64_t sandbox_extension_next_token = 1;
-+
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
- {
+-{
 -    if (verbose) puts("STUB: sandbox_apply called");
 -    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_issue_file called");
-+    (void)path; (void)flags;
-+    return sandbox_extension_next_token++;
- }
+-}
++/* darling-lol: compile/apply/params family, with Apple's shapes (Chromium's
++ * Seatbelt::Compile reads ->data/->size of the returned profile and passes
++ * a params handle as the 2nd argument). No seatbelt compiler exists, so a
++ * "compiled" profile carries the source bytes and applying succeeds.
++ * (The extension token family lives in libsystem_sandbox, not here.) */
++typedef struct {
++    char *builtin;
++    const uint8_t *data;
++    size_t size;
++} darling_sandbox_profile_t;
  
 -void* sandbox_apply_container(void)
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
++static darling_sandbox_profile_t *stub_profile(const char *source, char **errorbuf)
  {
 -    if (verbose) puts("STUB: sandbox_apply_container called");
 -    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
-+    (void)name; (void)flags;
-+    return sandbox_extension_next_token++;
++    if (errorbuf != NULL) *errorbuf = NULL;
++    darling_sandbox_profile_t *profile = calloc(1, sizeof(*profile));
++    if (profile == NULL) return NULL;
++    char *copy = strdup(source != NULL ? source : "");
++    if (copy == NULL) { free(profile); return NULL; }
++    profile->data = (const uint8_t *)copy;
++    profile->size = strlen(copy);
++    return profile;
  }
  
 -void* sandbox_compile_entitlements(void)
-+int sandbox_extension_consume(int64_t token)
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
  {
 -    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 -    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_consume called");
-+    (void)token;
-+    return 0;
++    if (verbose) puts("STUB: sandbox_compile_string called");
++    (void)params;
++    return stub_profile(profile, errorbuf);
  }
  
 -void* sandbox_compile_file(void)
-+int sandbox_extension_release(int64_t token)
-+{
-+    if (verbose) puts("STUB: sandbox_extension_release called");
-+    (void)token;
-+    return 0;
-+}
-+
-+/* darling-lol: compile/apply family. No seatbelt compiler exists, so
-+ * "compiling" a profile yields a dummy handle and applying succeeds.
-+ * Signatures match Apple's (the old stubs had wrong shapes). */
-+
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
-+{
-+    if (verbose) puts("STUB: sandbox_compile_string called");
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
-+}
-+
-+void* sandbox_compile_file(const char *path, char **errorbuf)
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_file called");
 -    return NULL;
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
++    (void)params;
++    return stub_profile(path, errorbuf);
  }
  
 -void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_named called");
 -    return NULL;
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
++    (void)params;
++    return stub_profile(name, errorbuf);
  }
  
 -void* sandbox_compile_string(void)
-+void* sandbox_compile_entitlements(void *entitlements, char **errorbuf)
++void* sandbox_compile_entitlements(const char *entitlements, void *params, char **errorbuf)
  {
 -    if (verbose) puts("STUB: sandbox_compile_string called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_compile_entitlements called");
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
++    (void)params;
++    return stub_profile(entitlements, errorbuf);
  }
  
 -void* sandbox_container_paths_iterate_items(void)
-+int sandbox_apply(void *handle)
++int sandbox_apply(void *profile)
  {
 -    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_apply called");
-+    (void)handle;
++    (void)profile;
++    return 0;
++}
++
++void sandbox_free_profile(void *handle)
++{
++    if (verbose) puts("STUB: sandbox_free_profile called");
++    darling_sandbox_profile_t *profile = handle;
++    if (profile == NULL) return;
++    free(profile->builtin);
++    free((void *)profile->data);
++    free(profile);
+ }
+ 
++/* Opaque params handle; must be non-NULL or Chromium treats it as failure. */
+ void* sandbox_create_params(void)
+ {
+     if (verbose) puts("STUB: sandbox_create_params called");
+-    return NULL;
++    return calloc(1, 64);
++}
++
++int sandbox_set_param(void *params, const char *key, const char *value)
++{
++    if (verbose) puts("STUB: sandbox_set_param called");
++    (void)params; (void)key; (void)value;
 +    return 0;
  }
  
--void* sandbox_create_params(void)
-+void sandbox_free_profile(void *handle)
+-void* sandbox_free_params(void)
++void sandbox_free_params(void *params)
  {
--    if (verbose) puts("STUB: sandbox_create_params called");
-+    if (verbose) puts("STUB: sandbox_free_profile called");
-+    free(handle);
+     if (verbose) puts("STUB: sandbox_free_params called");
++    free(params);
 +}
 +
 +void* sandbox_apply_container(void)
@@ -8701,22 +8707,26 @@ index 5af5298aa..fb59ee5d1 100644
      return NULL;
  }
  
--void* sandbox_free_params(void)
+-void* sandbox_free_profile(void)
 +void* sandbox_container_paths_iterate_items(void)
  {
--    if (verbose) puts("STUB: sandbox_free_params called");
+-    if (verbose) puts("STUB: sandbox_free_profile called");
 +    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
      return NULL;
  }
  
--void* sandbox_free_profile(void)
-+void* sandbox_create_params(void)
- {
--    if (verbose) puts("STUB: sandbox_free_profile called");
-+    if (verbose) puts("STUB: sandbox_create_params called");
+@@ -101,11 +143,6 @@ void* sandbox_inspect_smemory(void)
      return NULL;
  }
  
+-void* sandbox_set_param(void)
+-{
+-    if (verbose) puts("STUB: sandbox_set_param called");
+-    return NULL;
+-}
+ 
+ void* sandbox_set_user_state_item(void)
+ {
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
@@ -8765,7 +8775,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb..96dad3c 100644
+index f48cceb9..6c2b7d73 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8822,8 +8832,40 @@ index f48cceb..96dad3c 100644
  	return 0;
  }
  
-@@ -84,42 +108,56 @@ int sandbox_unsuspend(void)
+@@ -82,44 +106,88 @@ int sandbox_unsuspend(void)
+ 	return -1;
+ }
  
++/* darling-lol: see sandbox.h. No enforcement exists, so tokens are
++ * placeholders and every consume succeeds with a fresh positive handle. */
++static int64_t sandbox_extension_next_handle = 1;
++
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
++{
++	(void)extension_class; (void)path; (void)flags;
++	return strdup("darling-sandbox-extension");
++}
++
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
++{
++	(void)extension_class; (void)name; (void)flags;
++	return strdup("darling-sandbox-extension");
++}
++
++int64_t sandbox_extension_consume(const char *extension_token)
++{
++	if (extension_token == NULL) {
++		return -1;
++	}
++	return __atomic_fetch_add(&sandbox_extension_next_handle, 1, __ATOMIC_RELAXED);
++}
++
++int sandbox_extension_release(int64_t extension_handle)
++{
++	(void)extension_handle;
++	return 0;
++}
++
  int sandbox_issue_extension(const char *path, char **ext_token)
  {
 -	return -1;
@@ -8887,7 +8929,7 @@ index f48cceb..96dad3c 100644
  }
  
  int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
-@@ -129,7 +167,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
+@@ -129,7 +197,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
  
  int sandbox_wakeup_daemon(char **errorbuf)
  {
@@ -8898,7 +8940,7 @@ index f48cceb..96dad3c 100644
  	return -1;
  }
  
-@@ -173,4 +213,16 @@ int rootless_check_datavault_flag(const char* path, const char* storage_class) {
+@@ -173,4 +243,16 @@ int rootless_check_datavault_flag(const char* path, const char* storage_class) {
  
  int sandbox_query_approval_policy_for_path(const char* query, const char* path, char **approval) {
  	return -1;
@@ -8918,20 +8960,22 @@ index f48cceb..96dad3c 100644
 +	return 0;
 +}
 diff --git a/src/sandbox/sandbox.h b/src/sandbox/sandbox.h
-index 6fa2d088c..655554284 100644
+index 6fa2d088..c41af679 100644
 --- a/src/sandbox/sandbox.h
 +++ b/src/sandbox/sandbox.h
-@@ -161,6 +161,14 @@ int sandbox_note(const char *note);
+@@ -161,6 +161,16 @@ int sandbox_note(const char *note);
  int sandbox_suspend(pid_t pid);
  int sandbox_unsuspend(void);
  
-+/* darling-lol: SeatbeltExtensions token family (used by Chromium).
-+ * No enforcement exists, so issue dummy nonzero tokens and accept
-+ * consume/release as no-ops. */
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags);
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags);
-+int sandbox_extension_consume(int64_t token);
-+int sandbox_extension_release(int64_t token);
++/* darling-lol: sandbox extension token family (used by Chromium's
++ * SeatbeltExtension). On macOS these are exported by libsystem_sandbox
++ * (re-exported through libSystem), not libsandbox. Issuing returns a
++ * malloc'd token string the caller free()s; consuming returns a positive
++ * handle (<= 0 is failure); releasing takes that handle. */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags);
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags);
++int64_t sandbox_extension_consume(const char *extension_token);
++int sandbox_extension_release(int64_t extension_handle);
 +
  int sandbox_issue_extension(const char *path, char **ext_token);
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
