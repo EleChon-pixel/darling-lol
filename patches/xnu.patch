@@ -4828,10 +4828,12 @@ index 6dca738..3d864d2 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
-index adaff44..eb445fe 100644
+index adaff44..777a176 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
-@@ -2,16 +2,19 @@
+@@ -1,17 +1,25 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/xattr/fremovexattr.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
  
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/conversion/errno.h>
@@ -4843,6 +4845,10 @@ index adaff44..eb445fe 100644
  	int ret;
 +	char linux_name[1024];
  
++	ret = dc_sip_check_fd(fd);
++	if (ret != 0)
++		return ret;
++
 +	name = xattr_name_to_linux(name, linux_name, sizeof(linux_name));
  	ret = LINUX_SYSCALL(__NR_fremovexattr, fd, name);
  
@@ -4989,10 +4995,12 @@ index f4740ec..bc88090 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
-index 628a4f7..705b845 100644
+index 628a4f7..4418343 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
-@@ -2,6 +2,9 @@
+@@ -1,7 +1,11 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/xattr/removexattr.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
  
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/conversion/errno.h>
@@ -5002,7 +5010,7 @@ index 628a4f7..705b845 100644
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
  
  #define XATTR_NOFOLLOW	1
-@@ -9,14 +12,26 @@
+@@ -9,14 +13,29 @@
  long sys_removexattr(const char* path, const char* name, int options)
  {
  	int ret;
@@ -5016,6 +5024,9 @@ index 628a4f7..705b845 100644
 +	ret = vchroot_expand(&vc);
 +	if (ret < 0)
 +		return errno_linux_to_bsd(ret);
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
 +
 +	name = xattr_name_to_linux(name, linux_name, sizeof(linux_name));
  
@@ -8099,3 +8110,111 @@ index 0000000..04d64c1
 +    return error;
 +}
 +#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
+index 543b8cf..affe2a9 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
+@@ -6,6 +6,7 @@
+ #include <darling/emulation/conversion/common_at.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ extern char *strcpy(char *dest, const char *src);
+ extern int do_linux_fchmodat(int fd, const char* path, int mode, int flag);
+@@ -68,6 +69,14 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
+ 		return rv;
+ #endif
+ 
++#if HAS_PATH
++	rv = dc_sip_check_write(vc.path);
++#else
++	rv = dc_sip_check_fd(fd);
++#endif
++	if (rv != 0)
++		return rv;
++
+ 	if (alist->bitmapcount < ATTR_BIT_MAP_COUNT)
+ 		return -EINVAL;
+ 
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
+index fc2cdb7..ae9eff9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
+@@ -1,4 +1,5 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/stat/mkfifo.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ #include <sys/errno.h>
+ 
+@@ -28,6 +29,9 @@ long sys_mkfifo(const char* path, unsigned int mode)
+ 	ret = vchroot_expand(&vc);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
+ 
+ 	#if defined(__NR_mknod)
+ 		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode | LINUX_S_IFIFO, 0);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
+index e2c5634..8cda550 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
+@@ -1,4 +1,5 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chmod_extended.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/errno.h>
+@@ -18,6 +19,9 @@ long sys_chmod_extended(const char* path, int uid, int gid, int mode, void* xsec
+ 	ret = vchroot_expand(&vc);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
+ 
+ 	#if defined(__NR_chmod)
+ 		ret = LINUX_SYSCALL(__NR_chmod, vc.path, mode);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
+index 87f0d90..98b5c4b 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
+@@ -1,4 +1,5 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchmod_extended.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ #include <sys/types.h>
+ #include <sys/kauth.h>
+@@ -16,6 +17,10 @@ long sys_fchmod_extended(int fd, int uid, int gid, int mode, void* xsec)
+ 		return 0;
+ 	}
+ 
++	ret = dc_sip_check_fd(fd);
++	if (ret != 0)
++		return ret;
++
+ 	ret = LINUX_SYSCALL2(__NR_fchmod, fd, mode);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
+index 8ae6ae0..5baf453 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
+@@ -1,4 +1,5 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/mknod.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ #include <darling/emulation/other/mach/lkm.h>
+ #include <darling/emulation/common/base.h>
+@@ -20,6 +21,9 @@ long sys_mknod(const char* path, int mode, int dev)
+ 	ret = vchroot_expand(&vc);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
+ 
+ 	#if defined(__NR_mknod)
+ 		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode, dev);
