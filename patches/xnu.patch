@@ -3767,7 +3767,7 @@ index 927ccbb..ae353d3 100644
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
-index 76b6f53..a6c24ff 100644
+index 76b6f53..4004d80 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
 @@ -4,6 +4,7 @@
@@ -3778,7 +3778,7 @@ index 76b6f53..a6c24ff 100644
  #include <darling/emulation/conversion/signal/duct_signals.h>
  #include <darling/emulation/common/bsdthread/per_thread_wd.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
-@@ -18,18 +19,21 @@
+@@ -18,27 +19,45 @@
  
  extern _libkernel_functions_t _libkernel_functions;
  
@@ -3808,7 +3808,19 @@ index 76b6f53..a6c24ff 100644
  	else if (ret == 0)
  	{
  		// in the child
-@@ -39,6 +43,11 @@ long sys_fork(void)
++#ifndef VARIANT_DYLD
++		/* darling-lol: the kqueue emulation linked into libsystem_kernel is not
++		 * the copy libSystem's fork handlers reset (they bind to libSystem's own
++		 * copy), so reset its locks here: a lock held by another parent thread
++		 * at fork otherwise hangs the child's first dup2/close of a kqueue fd,
++		 * e.g. in posix_spawn file actions. Lock-only (malloc is still locked) and
++		 * first, before anything in the child can close or dup an fd. */
++		extern void kqueue_postfork_child_reset_locks(void);
++		kqueue_postfork_child_reset_locks();
++#endif
+ 
+ 		// the old RPC FD will be closed in `guard_table_postfork_child`;
+ 		// we don't need to close it ourselves.
  		// that should also take care of closing descriptors for any other threads.
  		guard_table_postfork_child();
  

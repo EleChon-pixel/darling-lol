@@ -169,7 +169,7 @@ index a328f80..d0141aa 100644
 +    return result;
 +}
 diff --git a/src/common/kqueue.c b/src/common/kqueue.c
-index 61cc9dc..f05576d 100644
+index 61cc9dc..39db497 100644
 --- a/src/common/kqueue.c
 +++ b/src/common/kqueue.c
 @@ -23,6 +23,8 @@
@@ -197,7 +197,39 @@ index 61cc9dc..f05576d 100644
      kqops.kqueue_free(kq);
      free(kq);
  }
-@@ -329,6 +333,7 @@ void kqueue_delref(struct kqueue *kq)
+@@ -304,6 +308,31 @@ static void _kqueue_close_atfork_cb(int kqfd, void* kqptr, void* private)
+     kqueue_delref(kq);
+ }
+ 
++/* darling-lol: libkqueue's objects are linked into both libSystem and
++ * libsystem_kernel, each copy with its own kq_mtx/kqmap. libSystem's fork
++ * handlers call kqueue_atfork, which binds to libSystem's (unused) copy, so
++ * the live copy in libsystem_kernel kept whatever locks other parent threads
++ * held at fork: a posix_spawn child then hung forever in kqueue_dup during
++ * its dup2 file actions (Chromium renderer launches). libsystem_kernel's
++ * sys_fork calls this in the child. It must not allocate or free: malloc's
++ * zones stay locked until _malloc_fork_child runs later. */
++static void _kqueue_reset_lock_postfork_cb(int kqfd, void* kqptr, void* private)
++{
++    struct kqueue* kq = (struct kqueue*) kqptr;
++    tracing_mutex_init(&kq->kq_mtx, NULL);
++}
++
++void kqueue_postfork_child_reset_locks(void)
++{
++#ifdef DARLING
++    __darling_kqueue_listen_registry_postfork_child();
++#endif
++    if (kqmap == NULL)
++        return;
++    pthread_mutex_init(&kq_mtx, NULL);
++    map_foreach(kqmap, _kqueue_reset_lock_postfork_cb, NULL);
++}
++
+ void VISIBLE kqueue_atfork(void)
+ {
+     if (kqmap != NULL)
+@@ -329,6 +358,7 @@ void kqueue_delref(struct kqueue *kq)
  int VISIBLE
  kqueue_impl(void)
  {
@@ -311,6 +343,48 @@ index 5c0718e..e7a0841 100644
  //DEADWOOD: struct knote * knote_get_by_data(struct filter *filt, intptr_t);
  struct knote * knote_new(void);
  #define knote_retain(kn) atomic_inc(&kn->kn_ref)
+diff --git a/src/darling/listenregistry.c b/src/darling/listenregistry.c
+index 05b2b82..4f59b4a 100644
+--- a/src/darling/listenregistry.c
++++ b/src/darling/listenregistry.c
+@@ -32,12 +32,14 @@ void __darling_kqueue_register_listen(int fd)
+     pthread_mutex_lock(&registry_mtx);
+ 
+     if (registry_vector == NULL) {
+-        registry_vector = malloc(REGISTRY_VECTOR_INITIAL_CAPACITY);
++        /* darling-lol: sizes are in elements, not bytes (was an 8-byte
++         * buffer for 8 ints: heap overflow from the third listener on). */
++        registry_vector = malloc(REGISTRY_VECTOR_INITIAL_CAPACITY * sizeof(*registry_vector));
+         if (registry_vector == NULL)
+             goto quit;
+         registry_vector_capacity = REGISTRY_VECTOR_INITIAL_CAPACITY;
+     } else if (registry_vector_size == registry_vector_capacity) {
+-        int* newPtr = realloc(registry_vector, registry_vector_capacity * 2);
++        int* newPtr = realloc(registry_vector, registry_vector_capacity * 2 * sizeof(*registry_vector));
+         if (newPtr == NULL)
+             goto quit;
+         registry_vector = newPtr;
+@@ -69,3 +71,8 @@ void __darling_kqueue_unregister_listen(int fd)
+ 
+     pthread_mutex_unlock(&registry_mtx);
+ }
++
++void __darling_kqueue_listen_registry_postfork_child(void)
++{
++    pthread_mutex_init(&registry_mtx, NULL);
++}
+diff --git a/src/darling/listenregistry.h b/src/darling/listenregistry.h
+index 917f272..22d5bb0 100644
+--- a/src/darling/listenregistry.h
++++ b/src/darling/listenregistry.h
+@@ -6,5 +6,7 @@
+ bool VISIBLE __darling_kqueue_get_listen_status(int fd);
+ void VISIBLE __darling_kqueue_register_listen(int fd);
+ void VISIBLE __darling_kqueue_unregister_listen(int fd);
++/* darling-lol: reset the registry lock in a fork child (no allocation). */
++void __darling_kqueue_listen_registry_postfork_child(void);
+ 
+ #endif
 diff --git a/src/linux/machport.c b/src/linux/machport.c
 index 074958e..1e99023 100644
 --- a/src/linux/machport.c
