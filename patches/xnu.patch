@@ -1849,6 +1849,47 @@ index 8c6d5d9..6fd1acf 100644
  	return out;
  }
  
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+index a26ae39..3105366 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+@@ -11,13 +11,34 @@ Lentry_hook:
+ 	movq	(%r10,%rax,8), %r10
+ 	test	%r10, %r10
+ 	jz		.no_sys
++	# darling-lol: keep the syscall number (two slots, so the stack parity
++	# the handlers see is unchanged) to fix up %rdx after the call.
++	pushq	%rax
++	pushq	%rax
+ 	# Re-push possible 7th and 8th arg
+-	movq	24(%rsp), %r11
++	movq	40(%rsp), %r11
+ 	pushq	%r11
+-	movq	24(%rsp), %r11
++	movq	40(%rsp), %r11
+ 	pushq	%r11
+ 	call	*%r10
+ 	addq	$16, %rsp
++	popq	%r10
++	popq	%r10
++	# darling-lol: XNU returns rv[1] in %rdx, which is 0 for every BSD syscall
++	# except the few whose stubs consume it. Handlers here are C functions that
++	# leave %rdx undefined; Chromium's SendtoAndDetectBogusReturnValue treats a
++	# nonzero %rdx after sendto() as a kernel bug and fails every socket write
++	# with ERR_NETWORK_CHANGED. Keep %rdx for fork (2), pipe (42; sys_pipe sets
++	# it), vfork (66) and gettimeofday (116); zero it for everything else.
++	cmpq	$2, %r10
++	je		.std_ret
++	cmpq	$42, %r10
++	je		.std_ret
++	cmpq	$66, %r10
++	je		.std_ret
++	cmpq	$116, %r10
++	je		.std_ret
++	xorl	%edx, %edx
+ .std_ret:
+ Lexit_hook:
+ 	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 index 7d5ef80..c8672bb 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
