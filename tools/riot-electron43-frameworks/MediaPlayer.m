@@ -34,6 +34,7 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 	NSMutableArray *_targets;
 }
 - (id)addTargetWithHandler:(id)handler;
+- (void)addTarget:(id)target action:(SEL)action;
 - (void)removeTarget:(id)target;
 - (void)removeTarget:(id)target action:(SEL)action;
 - (BOOL)isEnabled;
@@ -112,6 +113,13 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
     else
         [_targets removeAllObjects];
 }
+/* Chromium's media-session delegate registers with target/action as well as
+ * blocks; the target is the token removeTarget: takes back. */
+- (void)addTarget:(id)target action:(SEL)action
+{
+	if (target && [_targets indexOfObjectIdenticalTo:target] == NSNotFound)
+		[_targets addObject:target];
+}
 - (void)removeTarget:(id)target action:(SEL)action { [self removeTarget:target]; }
 - (BOOL)isEnabled { return YES; }
 - (void)setEnabled:(BOOL)enabled { }
@@ -161,6 +169,12 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 - (MPRemoteCommand *)dislikeCommand { return [self commandFor:@"dislike"]; }
 - (MPRemoteCommand *)bookmarkCommand { return [self commandFor:@"bookmark"]; }
 - (MPRemoteCommand *)languageOptionCommand { return [self commandFor:@"languageOption"]; }
+/* Electron 43 also configures these when a page starts media playback; a
+ * missing one is an unrecognized selector that aborts the browser process. */
+- (MPRemoteCommand *)changeRepeatModeCommand { return [self commandFor:@"changeRepeatMode"]; }
+- (MPRemoteCommand *)changeShuffleModeCommand { return [self commandFor:@"changeShuffleMode"]; }
+- (MPRemoteCommand *)enableLanguageOptionCommand { return [self commandFor:@"enableLanguageOption"]; }
+- (MPRemoteCommand *)disableLanguageOptionCommand { return [self commandFor:@"disableLanguageOption"]; }
 @end
 
 @implementation MPNowPlayingInfoCenter
