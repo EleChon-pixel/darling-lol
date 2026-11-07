@@ -35,6 +35,11 @@ pci_name() { # vendor device (hex without 0x) -> "Vendor Model"
  done
 }
 
+identity() { # key -> value from the per-prefix runtime identity, empty when unset
+ [ -r /private/etc/darling-runtime-identity.conf ] || return 0
+ sed -n "s/^$1=//p" /private/etc/darling-runtime-identity.conf | head -n 1
+}
+
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  # Same switch as the Metal device name: report the MacBookPro16,1 compatibility
  # GPU profile so system_profiler and Metal agree. This changes the reported
@@ -42,6 +47,18 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  # that actually presents frames.
  mac_gpu_profile=0
  case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) mac_gpu_profile=1;; esac
+ # A configured hardware profile (the runtime identity Metal, IOKit and sysctl read)
+ # names the Mac's GPUs; it takes precedence over the built-in MacBookPro16,1 pair.
+ integrated_name=$(identity gpu.integrated.name); discrete_name=$(identity gpu.discrete.name)
+ integrated_device=$(identity gpu.integrated.device | sed 's/^0[xX]//' | tr 'A-F' 'a-f')
+ discrete_device=$(identity gpu.discrete.device | sed 's/^0[xX]//' | tr 'A-F' 'a-f')
+ discrete_vendor=$(identity gpu.discrete.vendor | sed 's/^0[xX]//' | tr 'A-F' 'a-f')
+ [ -n "$integrated_name" ] || integrated_name='Intel UHD Graphics 630'
+ [ -n "$integrated_device" ] || integrated_device=3e9b
+ [ -n "$discrete_name" ] || discrete_name='AMD Radeon Pro 5500M'
+ [ -n "$discrete_device" ] || discrete_device=7340
+ [ -n "$discrete_vendor" ] || discrete_vendor=1002
+ [ -n "$(identity gpu.discrete.name)$(identity gpu.integrated.name)" ] && mac_gpu_profile=1
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -53,7 +70,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   bus=builtin
   if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
-    1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
+    1002|10de) vendor=$discrete_vendor; device=$discrete_device; name=$discrete_name
                vram=${DARLING_METAL_VRAM_MB:-4096}
                case "$vram" in ''|*[!0-9]*) vram=4096;; esac
                # Keep the numeric test overflow-safe: a long digit string must
@@ -62,7 +79,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
                 vram=4096
                fi
                bus=pcie;;
-    8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'
+    8086) vendor=8086; device=$integrated_device; name=$integrated_name
           vram=; bus=builtin;;
    esac
   fi

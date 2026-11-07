@@ -3780,9 +3780,10 @@ new file mode 100644
 +#endif
 diff --git a/src/IOGraphicsDevices.mm b/src/IOGraphicsDevices.mm
 new file mode 100644
+index 0000000..de76481
 --- /dev/null
 +++ b/src/IOGraphicsDevices.mm
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,258 @@
 +#include "IOGraphicsDevices.h"
 +#import <Foundation/NSArray.h>
 +#import <Foundation/NSData.h>
@@ -3795,13 +3796,88 @@ new file mode 100644
 +#include <cstdlib>
 +#include <cstring>
 +#include <map>
++#include <string>
 +
 +using IOGraphicsIdentity::Profile;
 +
 +static const char* const kHostDrmDir = "/Volumes/SystemRoot/sys/class/drm";
 +
++// darling-lol: the per-prefix runtime identity (configure-darling-platform.py
++// --hardware-profile) names the Mac's GPUs; libsystem_kernel and Metal read the
++// same file, so IOKit, Metal and system_profiler agree.
++static bool runtimeIdentity(const char* key, std::string* value)
++{
++	FILE* file = fopen("/private/etc/darling-runtime-identity.conf", "r");
++	if (!file)
++		return false;
++	char line[512];
++	const size_t keyLength = std::strlen(key);
++	bool found = false;
++	while (!found && fgets(line, sizeof(line), file))
++	{
++		line[std::strcspn(line, "\r\n")] = '\0';
++		if (std::strncmp(line, key, keyLength) == 0 && line[keyLength] == '=' && line[keyLength + 1])
++		{
++			value->assign(line + keyLength + 1);
++			found = true;
++		}
++	}
++	fclose(file);
++	return found;
++}
++
++static bool configuredProfile(const char* slot, Profile* profile)
++{
++	// Names outlive the call: IOPCIDevice keeps the pointer.
++	static std::map<std::string, std::string> names;
++	std::string prefix = std::string("gpu.") + slot + ".";
++	std::string name, vendor, device;
++	if (!runtimeIdentity((prefix + "name").c_str(), &name) ||
++		!runtimeIdentity((prefix + "vendor").c_str(), &vendor) ||
++		!runtimeIdentity((prefix + "device").c_str(), &device))
++		return false;
++	char* end = nullptr;
++	const unsigned long vendorID = strtoul(vendor.c_str(), &end, 16);
++	if (*end || vendorID > 0xffff)
++		return false;
++	const unsigned long deviceID = strtoul(device.c_str(), &end, 16);
++	if (*end || deviceID > 0xffff)
++		return false;
++	std::string& stored = names[slot];
++	stored = name;
++	profile->vendorID = uint32_t(vendorID);
++	profile->deviceID = uint32_t(deviceID);
++	profile->model = stored.c_str();
++	if (vendorID == 0x8086)
++	{
++		profile->pciName = "IGPU";
++		profile->acceleratorClass = "IntelAccelerator";
++		profile->registryID = IOGraphicsIdentity::kIntegratedRegistryID;
++		profile->vramMB = 0;
++	}
++	else
++	{
++		profile->pciName = "GFX0";
++		profile->acceleratorClass = "AMDRadeonX6000_AMDNavi14GraphicsAccelerator";
++		profile->registryID = IOGraphicsIdentity::kDiscreteRegistryID;
++		profile->vramMB = 4096;
++	}
++	return true;
++}
++
 +bool IOGraphicsIdentity::profileForHost(uint32_t vendorID, uint32_t deviceID, uint32_t revisionID, Profile* profile)
 +{
++	// A configured Mac profile replaces every host GPU with that Mac's GPU of the same
++	// role: Intel is the integrated one, AMD and NVIDIA the discrete one.
++	if (vendorID == 0x8086 || vendorID == 0x1002 || vendorID == 0x10de)
++	{
++		if (configuredProfile(vendorID == 0x8086 ? "integrated" : "discrete", profile))
++		{
++			profile->revisionID = revisionID;
++			return true;
++		}
++	}
++
 +	switch (vendorID)
 +	{
 +	case 0x1002:

@@ -2312,10 +2312,95 @@ index cc10f1d..68a72aa 100644
  	int code = 0;
  	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
-index f79f057..54c42aa 100644
+index f79f057..964e130 100644
 --- a/src/darlingserver.cpp
 +++ b/src/darlingserver.cpp
-@@ -497,6 +497,45 @@ static void handle_sigusr1(int signum) {
+@@ -118,9 +118,60 @@ const char* xdgDirectory(const char* name)
+ 	return dir;
+ }
+ 
++/*
++ * darling-lol: one value from the per-prefix runtime identity
++ * (<prefix>/private/etc/darling-runtime-identity.conf, "key=value" lines written
++ * by configure-darling-platform.py). The guest's libsystem_kernel reads the same
++ * file for its sysctls, so every process sees one machine identity.
++ */
++static bool readRuntimeIdentity(const char* prefix, const char* key, char* value, size_t capacity)
++{
++	char path[4096];
++	char line[512];
++	size_t keyLength = strlen(key);
++	bool found = false;
++
++	snprintf(path, sizeof(path), "%s/private/etc/darling-runtime-identity.conf", prefix);
++	FILE* file = fopen(path, "re");
++	if (file == NULL)
++		return false;
++	while (!found && fgets(line, sizeof(line), file) != NULL)
++	{
++		size_t length = strcspn(line, "\r\n");
++		line[length] = '\0';
++		if (length <= keyLength || line[keyLength] != '=' || strncmp(line, key, keyLength) != 0)
++			continue;
++		const char* source = line + keyLength + 1;
++		if (strlen(source) == 0 || strlen(source) >= capacity)
++			break;
++		for (const char* c = source; *c; c++)
++			if (*c < 0x20 || *c > 0x7e)
++				goto out;
++		strcpy(value, source);
++		found = true;
++	}
++out:
++	fclose(file);
++	return found;
++}
++
++// A Mac never has /Users/<name>/LinuxHome or folders that point into the host
++// root. With home.isolated=1 the guest home keeps real, prefix-local folders.
++static void isolateHomeEntry(const char* path, bool directory)
++{
++	struct stat st;
++	if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode))
++		unlink(path);
++	if (directory)
++		mkdir(path, 0755);
++}
++
+ void setupUserHome(const char* prefix, uid_t originalUID)
+ {
+ 	char buf[4096], buf2[4096];
++	char isolatedValue[8];
++	bool isolated = readRuntimeIdentity(prefix, "home.isolated", isolatedValue, sizeof(isolatedValue)) &&
++		strcmp(isolatedValue, "1") == 0;
+ 
+ 	snprintf(buf, sizeof(buf), "%s/Users", prefix);
+ 
+@@ -167,7 +218,8 @@ void setupUserHome(const char* prefix, uid_t originalUID)
+ 	unlink(buf);
+ 
+ 	// symlink /Users/$LOGIN/LinuxHome -> $HOME
+-	symlink(buf2, buf);
++	if (!isolated)
++		symlink(buf2, buf);
+ 
+ 	static const char* xdgmap[][2] = {
+ 		{ "DESKTOP", "Desktop" },
+@@ -181,6 +233,13 @@ void setupUserHome(const char* prefix, uid_t originalUID)
+ 
+ 	for (int i = 0; i < sizeof(xdgmap) / sizeof(xdgmap[0]); i++)
+ 	{
++		if (isolated)
++		{
++			snprintf(buf, sizeof(buf), "%s/Users/%s/%s", prefix, login, xdgmap[i][1]);
++			isolateHomeEntry(buf, true);
++			continue;
++		}
++
+ 		const char* dir = xdgDirectory(xdgmap[i][0]);
+ 		if (!dir)
+ 			continue;
+@@ -497,6 +556,45 @@ static void handle_sigusr1(int signum) {
  };
  #endif
  
@@ -2361,7 +2446,7 @@ index f79f057..54c42aa 100644
  int main(int argc, char** argv) {
  	const char* prefix = NULL;
  	uid_t originalUID = -1;
-@@ -515,6 +554,30 @@ int main(int argc, char** argv) {
+@@ -515,6 +613,30 @@ int main(int argc, char** argv) {
  	char putOld[4096];
  	char *p;
  
@@ -2392,7 +2477,26 @@ index f79f057..54c42aa 100644
  	if (argc < 6) {
  		fprintf(stderr, "darlingserver is not meant to be started manually\n");
  		exit(1);
-@@ -577,8 +640,15 @@ int main(int argc, char** argv) {
+@@ -549,6 +671,18 @@ int main(int argc, char** argv) {
+ 	//setupCoredumpPattern();
+ 	regain_privileges();
+ 
++	// darling-lol: darling unshared a UTS namespace for this container, so the
++	// configured Mac hostname applies to every guest process (uname, gethostname,
++	// kern.hostname) without touching the host's.
++	{
++		char hostname[256];
++		if (readRuntimeIdentity(prefix, "kern.hostname", hostname, sizeof(hostname)) &&
++			sethostname(hostname, strlen(hostname)) != 0)
++		{
++			fprintf(stderr, "Warning: cannot set the configured hostname: %s\n", strerror(errno));
++		}
++	}
++
+ 	// read the default rlimit so we can restore it for our children
+ 	if (getrlimit(RLIMIT_NOFILE, &default_limit) != 0) {
+ 		fprintf(stderr, "Failed to read default FD rlimit: %s\n", strerror(errno));
+@@ -577,8 +711,15 @@ int main(int argc, char** argv) {
  
  		// now set our increased rlimit
  		if (setrlimit(RLIMIT_NOFILE, &increased_limit) != 0) {
@@ -2410,7 +2514,7 @@ index f79f057..54c42aa 100644
  		}
  
  #endif
-@@ -745,6 +815,13 @@ int main(int argc, char** argv) {
+@@ -745,6 +886,13 @@ int main(int argc, char** argv) {
  #endif
  
  	// create the server

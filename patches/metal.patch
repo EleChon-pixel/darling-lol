@@ -1149,10 +1149,10 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..1c3728a 100644
+index f58184a..8af1b01 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
-@@ -2,14 +2,34 @@
+@@ -2,14 +2,36 @@
  // SPDX-License-Identifier: MPL-2.0
  
  #import <Metal/MTLDeviceInternal.h>
@@ -1170,6 +1170,8 @@ index f58184a..1c3728a 100644
  #import <Metal/stubs.h>
 +#import <Metal/MTLExceptionBridge.h>
 +#import <Metal/MTLTrace.h>
++#include <cstdio>
++#include <cstring>
 +#include <string>
 +#include <mutex>
 +#include <unordered_map>
@@ -1187,7 +1189,7 @@ index f58184a..1c3728a 100644
  
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceRemovalRequestedNotification = @"MTLDeviceRemovalRequested";
-@@ -88,6 +108,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -88,6 +110,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[observer release];
  };
  
@@ -1225,7 +1227,7 @@ index f58184a..1c3728a 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -96,6 +147,10 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -96,6 +149,10 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	NSThread* _pollingThread;
  	NSCondition* _threadExitCondition;
  	BOOL _threadIsRunning;
@@ -1236,7 +1238,7 @@ index f58184a..1c3728a 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +171,52 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +173,79 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1259,6 +1261,33 @@ index f58184a..1c3728a 100644
 +		vulkanName = "";
 +	}
 +	const char* mac = macName && priv ? MTLDeviceInfo::macGpuName(priv->properties().vendorID) : nullptr;
++	// darling-lol: a configured Mac hardware profile (the per-prefix runtime identity that
++	// sysctl and IOKit also read) names the Mac GPU of the same role, NVIDIA included.
++	static std::string configuredIntegrated, configuredDiscrete;
++	static const bool configured = [] {
++		bool any = false;
++		if (FILE* file = fopen("/private/etc/darling-runtime-identity.conf", "r")) {
++			char line[512];
++			while (fgets(line, sizeof(line), file)) {
++				line[strcspn(line, "\r\n")] = '\0';
++				if (strncmp(line, "gpu.integrated.name=", 20) == 0 && line[20]) {
++					configuredIntegrated = line + 20;
++					any = true;
++				} else if (strncmp(line, "gpu.discrete.name=", 18) == 0 && line[18]) {
++					configuredDiscrete = line + 18;
++					any = true;
++				}
++			}
++			fclose(file);
++		}
++		return any;
++	}();
++	if (configured && priv) {
++		const uint32_t vendor = priv->properties().vendorID;
++		const std::string& configuredName = vendor == 0x8086 ? configuredIntegrated : configuredDiscrete;
++		if ((vendor == 0x8086 || vendor == 0x1002 || vendor == 0x10de) && !configuredName.empty())
++			mac = configuredName.c_str();
++	}
 +	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str(), mac).c_str()];
 +	if (_name == nil) {
 +		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
@@ -1289,7 +1318,7 @@ index f58184a..1c3728a 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +224,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +253,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1297,7 +1326,7 @@ index f58184a..1c3728a 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +235,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +264,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1305,7 +1334,7 @@ index f58184a..1c3728a 100644
  
  	[super dealloc];
  }
-@@ -153,12 +256,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +285,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1415,7 +1444,7 @@ index f58184a..1c3728a 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +365,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +394,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1423,7 +1452,7 @@ index f58184a..1c3728a 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +383,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +412,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1438,7 +1467,7 @@ index f58184a..1c3728a 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +397,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +426,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1484,7 +1513,7 @@ index f58184a..1c3728a 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +442,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +471,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1604,7 +1633,7 @@ index f58184a..1c3728a 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +623,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +652,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {

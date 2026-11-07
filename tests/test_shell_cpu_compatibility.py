@@ -24,6 +24,11 @@ static unsigned reads;
 static bool read_string(const char* path, char* dst, int size) {
     ++reads; strcpy(dst, "5600000\\n"); return true;
 }
+static unsigned long long configured_hz;
+static bool darling_runtime_identity_u64(const char* key, unsigned long long* out) {
+    if (strcmp(key, "hw.cpufrequency") || !configured_hz) return false;
+    *out = configured_hz; return true;
+}
 #define sysctl_handler(name) long name(void* old, unsigned long* oldlen)
 ''' + size_macro + handler + '''
 int main(void) {
@@ -42,6 +47,9 @@ int main(void) {
     assert(handle_cpufrequency(&hz, &length) == 0 && hz == 5600000000ULL && length == 8);
     uint32_t legacy = 0; length = sizeof(legacy);
     assert(handle_cpufrequency_compat(&legacy, &length) == 0 && length == 4 && legacy == (uint32_t)5600000000ULL);
+    /* A hardware profile's nominal frequency wins over the host's maximum. */
+    configured_hz = 2400000000ULL; reads = 0; length = sizeof(hz);
+    assert(handle_cpufrequency(&hz, &length) == 0 && hz == 2400000000ULL && reads == 0);
 }
 ''')
 

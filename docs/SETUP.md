@@ -112,16 +112,19 @@ minutes without a client or match once it has seen one. See
 [the troubleshooting measurement](TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
 for the measured CPU effect and limitations.
 
-`RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
-the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
-GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),
-Flatpak/Snap/AppImage and exported shell functions, and `SHELL` becomes `/bin/zsh`.
-It is off by default. Variables that Darling or the host graphics and audio libraries read
-are always kept: `DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and the XDG base directories,
-D-Bus, PulseAudio/PipeWire/ALSA, `DRI_PRIME`, `MESA_*`, `__GL_*`, `__NV_*`, `VK_*`,
-`LD_PRELOAD` and `LD_LIBRARY_PATH`. List names to keep anyway in `RCLOL_KEEP_HOST_ENV`,
-for example `RCLOL_KEEP_HOST_ENV=WAYLAND_DISPLAY`. The launcher always closes inherited
-file descriptors above stderr before the guest starts.
+The guest starts from an allowlisted environment, not the host's. It keeps only
+what a Mac session has (`HOME`, `USER`, `LOGNAME`, `LANG`/`LC_*`, `TZ`, `TMPDIR`; `SHELL`
+becomes `/bin/zsh` and `PATH` `/usr/bin:/bin:/usr/sbin:/sbin`) and what Darling and the host
+graphics and audio libraries loaded into guest processes read: `DPREFIX`, `DISPLAY`,
+`XAUTHORITY`, `XMODIFIERS`, `XDG_RUNTIME_DIR`, `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`,
+`XDG_CONFIG_HOME`, D-Bus, PulseAudio/PipeWire/ALSA, `DRI_PRIME`, `EGL_PLATFORM`, `MESA_*`,
+`__GL_*`, `__NV_*`, `VK_*`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, fontconfig/locale paths, and the
+`DARLING_*`, `RCLOL_*` and `DYLD_*` runtime switches. Everything else the desktop session,
+shell, terminal or service manager exported (Wayland, toolkit, SSH agent, developer tools
+and so on) stays on the host. List names to keep anyway in `RCLOL_KEEP_HOST_ENV`, for
+example `RCLOL_KEEP_HOST_ENV=WAYLAND_DISPLAY`; `RCLOL_FILTER_HOST_ENV=0` passes the host
+environment through unchanged. The launcher always closes inherited file descriptors above
+stderr before the guest starts.
 
 ## Updating an existing runtime
 

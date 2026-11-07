@@ -49,6 +49,39 @@ The file is `<prefix>/private/etc/darling-platform.plist`. It uses this schema:
 }
 ```
 
+### Hardware profiles
+
+`--provision --hardware-profile macbookpro16,1|imac20,1` together with one of the
+allowlisted `--os-profile` values makes every identity surface describe one real
+Mac. Besides the IOKit platform properties above it writes
+`private/etc/darling-runtime-identity.conf`, which every guest process reads, and
+a matching `SystemVersion.plist`:
+
+| Key | Consumer | MacBookPro16,1 value |
+|---|---|---|
+| `hw.model` | sysctl | `MacBookPro16,1` |
+| `machdep.cpu.vendor`, `machdep.cpu.brand_string` | sysctl | `GenuineIntel`, `Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz` |
+| `machdep.cpu.signature` | sysctl `machdep.cpu.signature`/`family`/`model`/`stepping` | `0x906ED` (6 / 158 / 13) |
+| `hw.cpufamily` | sysctl | `0x0F817246` (`CPUFAMILY_INTEL_KABYLAKE`) |
+| `hw.cpufrequency` | sysctl, system_profiler | `2400000000` |
+| `cpu.threads_per_core` | sysctl `hw.physicalcpu*`, `machdep.cpu.core_count`, system_profiler | `2` |
+| `kern.osproductversion`, `kern.osversion` | sysctl, `SystemVersion.plist` | `14.7`, `23H124` |
+| `kern.hostname` | darlingserver sets it in the container's UTS namespace (`uname`, `gethostname`, `kern.hostname`) | `MacBook-Pro.local` |
+| `gpu.integrated.*`, `gpu.discrete.*` | iokitd `IOPCIDevice` entries, Metal `MTLDevice.name`, system_profiler | Intel UHD Graphics 630 `8086:3E9B`, AMD Radeon Pro 5500M `1002:7340` |
+| `home.isolated` | darlingserver: no `LinuxHome`, and `Desktop`, `Documents`, ... are prefix-local folders, not links into `/Volumes/SystemRoot` | `1` (`--host-home-links` writes `0`) |
+
+Logical CPU counts stay the host's, since the clients size worker pools from
+them; physical counts follow the profile's SMT ratio. With a profile, a host
+Intel GPU takes the integrated identity and any AMD or NVIDIA GPU the discrete
+one; only names and IDs change, never the device that renders. `--new-serial`
+replaces the saved serial with one laid out like that model's (plant `C02`,
+late-2019/2020 year and week characters, an `MD6x` configuration code); without
+it an existing serial is kept, so the identity stays stable across runs.
+
+A stopped prefix is required, and changes take effect when its processes start
+again. Direct x86 `CPUID` instructions still report the host CPU: Darling
+translates system calls, it does not virtualize the processor.
+
 Supported properties:
 
 | Property | Configuration value | IOKit value |

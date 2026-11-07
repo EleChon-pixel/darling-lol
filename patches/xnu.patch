@@ -1948,19 +1948,20 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..058b985 100644
+index f273989..ca7455b 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,6 +9,8 @@
+@@ -9,6 +9,9 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_topology.h>
 +#include <darling/emulation/common/cpu_frequency.h>
++#include <darling/emulation/common/runtime_identity.h>
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +18,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+@@ -16,6 +19,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
  
  /* Darling specific */
  enum {
@@ -1968,7 +1969,7 @@ index f273989..058b985 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +27,14 @@ enum {
+@@ -24,10 +28,15 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -1977,6 +1978,7 @@ index f273989..058b985 100644
 +	_HW_CPUFREQUENCY = 1500,
 +	_HW_CACHECONFIG = 1200,
 +	_HW_CACHESIZE,
++	_HW_CPUFAMILY = 1300,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -1984,7 +1986,7 @@ index f273989..058b985 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +46,78 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +48,79 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -1993,6 +1995,7 @@ index f273989..058b985 100644
 +static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
++static sysctl_handler(handle_cpufamily);
 +
 +/* hw.optional: CPUID leaf, output register (0-3 = eax-edx) and bit */
 +static long optional_feature(void* old, unsigned long* oldlen, unsigned int leaf, int reg, int bit)
@@ -2064,7 +2067,7 @@ index f273989..058b985 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +129,12 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,7 +132,13 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2075,10 +2078,11 @@ index f273989..058b985 100644
 +	{ .oid = _HW_CPUFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufrequency_compat", .handler = handle_cpufrequency_compat },
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
++	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
  	{ .oid = -1 }
  };
  
-@@ -71,6 +150,32 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +154,47 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -2094,10 +2098,25 @@ index f273989..058b985 100644
 +
 +		if (topo->detected && !topo->fixed)
 +		{
++			unsigned long long threads_per_core;
++
 +			hinfo.avail_cpus = topo->available;
 +			hinfo.max_cpus = topo->online;
 +			hinfo.physical_cpu = topo->physical_available;
 +			hinfo.physical_cpu_max = topo->physical_online;
++			// A configured Mac CPU keeps the real logical count (worker pools
++			// depend on it) but reports cores with the model's SMT ratio, so a
++			// hybrid host does not claim 16 physical cores on an 8-core i9.
++			if (darling_runtime_identity_u64("cpu.threads_per_core", &threads_per_core) &&
++				threads_per_core >= 1 && threads_per_core <= 8)
++			{
++				hinfo.physical_cpu = topo->available / threads_per_core;
++				hinfo.physical_cpu_max = topo->online / threads_per_core;
++				if (hinfo.physical_cpu == 0)
++					hinfo.physical_cpu = 1;
++				if (hinfo.physical_cpu_max == 0)
++					hinfo.physical_cpu_max = 1;
++			}
 +			hinfo.logical_cpu = topo->available;
 +			hinfo.logical_cpu_max = topo->online;
 +		}
@@ -2111,7 +2130,7 @@ index f273989..058b985 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +188,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +207,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2125,13 +2144,22 @@ index f273989..058b985 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +281,49 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +300,58 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
 +static long cpu_frequency(uint64_t* frequency)
 +{
 +	char buffer[32];
++	unsigned long long configured;
++
++	// The Mac model's nominal frequency (what XNU reports for Intel Macs),
++	// not the host's turbo maximum.
++	if (darling_runtime_identity_u64("hw.cpufrequency", &configured) && configured != 0)
++	{
++		*frequency = configured;
++		return 0;
++	}
 +	const char* paths[] = {
 +		"/Volumes/SystemRoot/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
 +		"/Volumes/SystemRoot/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
@@ -2182,15 +2210,17 @@ index f273989..058b985 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +338,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +366,120 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
 +
 +sysctl_handler(handle_model)
 +{
-+	// an Intel Mac model identifier, matching the x86_64 machine we emulate
-+	copyout_string("MacBookPro16,1", (char*) old, oldlen);
++	char configured[128];
++	const char* model = darling_runtime_identity_value("hw.model", configured, sizeof(configured))
++		? configured : "MacBookPro16,1";
++	copyout_string(model, (char*) old, oldlen);
 +	return 0;
 +}
 +
@@ -2287,11 +2317,33 @@ index f273989..058b985 100644
 +	}
 +	return 0;
 +}
++
++// hw.cpufamily: XNU's CPUFAMILY_* microarchitecture constant (CPUFAMILY_INTEL_KABYLAKE,
++// 0x0f817246, for the Coffee/Comet Lake CPUs of the supported Mac profiles). Only a
++// configured identity answers; without one the OID stays unknown as before.
++sysctl_handler(handle_cpufamily)
++{
++	unsigned long long family;
++
++	if (!darling_runtime_identity_u64("hw.cpufamily", &family))
++		return -ENOENT;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = (int)(unsigned int) family;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..61fe056 100644
+index bd9cdc2..e55eeec 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -23,6 +23,7 @@
+@@ -13,6 +13,7 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/conversion/fcntl/open.h>
+ #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/runtime_identity.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+@@ -23,6 +24,7 @@
  enum {
  	_KERN_MSGBUF = 1000,
  	_KERN_OSPRODUCTVERSION,
@@ -2299,7 +2351,7 @@ index bd9cdc2..61fe056 100644
  
  	_KERN_SEMMNS = 1000,
  };
-@@ -46,6 +47,7 @@ static sysctl_handler(handle_usrstack64);
+@@ -46,6 +48,7 @@ static sysctl_handler(handle_usrstack64);
  static sysctl_handler(handle_sysv_semmns);
  static sysctl_handler(handle_osproductversion);
  static sysctl_handler(handle_osrevision);
@@ -2307,7 +2359,7 @@ index bd9cdc2..61fe056 100644
  
  extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
  extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
-@@ -76,6 +78,7 @@ const struct known_sysctl sysctls_kern[] = {
+@@ -76,6 +79,7 @@ const struct known_sysctl sysctls_kern[] = {
  	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
  	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
  	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
@@ -2315,7 +2367,7 @@ index bd9cdc2..61fe056 100644
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
-@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
+@@ -139,18 +143,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -2345,7 +2397,29 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +350,19 @@ static sysctl_handler(handle_osrevision) {
+@@ -188,7 +197,9 @@ sysctl_handler(handle_version)
+ 
+ sysctl_handler(handle_osversion)
+ {
+-	const char* s = EMULATED_OSVERSION;
++	char configured[64];
++	const char* s = darling_runtime_identity_value("kern.osversion", configured, sizeof(configured))
++		? configured : EMULATED_OSVERSION;
+ 
+ 	copyout_string(s, (char*) old, oldlen);
+ 	return 0;
+@@ -327,7 +338,9 @@ sysctl_handler(handle_usrstack64)
+ }
+ 
+ static sysctl_handler(handle_osproductversion) {
+-	copyout_string(EMULATED_OSPRODUCTVERSION, (char*)old, oldlen);
++	char configured[64];
++	copyout_string(darling_runtime_identity_value("kern.osproductversion", configured, sizeof(configured))
++		? configured : EMULATED_OSPRODUCTVERSION, (char*)old, oldlen);
+ 	return 0;
+ };
+ 
+@@ -342,3 +355,19 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -2366,34 +2440,40 @@ index bd9cdc2..61fe056 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..122ad3a 100644
+index 4319355..12a5e20 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  #include <alloca.h>
  
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_topology.h>
++#include <darling/emulation/common/runtime_identity.h>
  #include <darling/emulation/conversion/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
-@@ -25,6 +26,7 @@ enum {
+@@ -25,6 +27,8 @@ enum {
  	_CPU_BRAND_STRING,
  	_CPU_FEATURES,
  	_CPU_CORE_COUNT,
 +	_CPU_THREAD_COUNT,
++	_CPU_SIGNATURE,
  };
  
  static sysctl_handler(handle_vendor);
-@@ -32,9 +34,15 @@ static sysctl_handler(handle_max_basic);
+@@ -32,9 +36,19 @@ static sysctl_handler(handle_max_basic);
  static sysctl_handler(handle_family);
  static sysctl_handler(handle_model);
  static sysctl_handler(handle_stepping);
 -static sysctl_handler(handle_brand_string);
 -static sysctl_handler(handle_features);
++static sysctl_handler(handle_signature);
 +static sysctl_handler(handle_brand_string)
 +{
-+	copyout_string("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", (char*) old, oldlen);
++	char configured[128];
++	const char* brand = darling_runtime_identity_value("machdep.cpu.brand_string", configured, sizeof(configured))
++		? configured : "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz";
++	copyout_string(brand, (char*) old, oldlen);
 +	return 0;
 +}
 +
@@ -2403,7 +2483,7 @@ index 4319355..122ad3a 100644
  
  const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_MAX_BASIC, .type = CTLTYPE_INT, .exttype = "I", .name = "max_basic", .handler = handle_max_basic },
-@@ -42,9 +50,10 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
+@@ -42,9 +56,11 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_FAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "family", .handler = handle_family },
  		{ .oid = _CPU_MODEL, .type = CTLTYPE_INT, .exttype = "I", .name = "model", .handler = handle_model },
  		{ .oid = _CPU_STEPPING, .type = CTLTYPE_INT, .exttype = "I", .name = "stepping", .handler = handle_stepping },
@@ -2412,11 +2492,124 @@ index 4319355..122ad3a 100644
  		{ .oid = _CPU_FEATURES, .type = CTLTYPE_STRING, .exttype = "S", .name = "features", .handler = handle_features },
  		{ .oid = _CPU_CORE_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "core_count", .handler = handle_core_count },
 +		{ .oid = _CPU_THREAD_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "thread_count", .handler = handle_thread_count },
++		{ .oid = _CPU_SIGNATURE, .type = CTLTYPE_INT, .exttype = "I", .name = "signature", .handler = handle_signature },
  	{ .oid = -1 }
  };
  
-@@ -154,38 +163,37 @@ sysctl_handler(handle_stepping)
-     return 0;
+@@ -80,6 +96,7 @@ static inline void copyout_int(int value, char* to_copy, size_t* to_copy_length)
+ 
+ sysctl_handler(handle_vendor)
+ {
++	char configured[32];
+ 	unsigned int level = 0;
+     unsigned int eax = 0;
+ 	union
+@@ -96,7 +113,8 @@ sysctl_handler(handle_vendor)
+     __cpuid(level, eax, v.ebx, v.ecx, v.edx);
+ 
+ 	v.name[12] = 0;
+-	copyout_string(v.name, (char*) old, oldlen);
++	copyout_string(darling_runtime_identity_value("machdep.cpu.vendor", configured, sizeof(configured))
++		? configured : v.name, (char*) old, oldlen);
+ 
+ 	return 0;
+ }
+@@ -108,84 +126,104 @@ sysctl_handler(handle_max_basic)
+ 
+     __cpuid(level, eax, ebx, ecx, edx);
+ 
+-	copyout_int(eax, (char*)old,oldlen);
++	(void) copyout_int;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = (int) eax;
+ 
+ 	return 0;
+ }
+ 
+-sysctl_handler(handle_family)
++/*
++ * XNU's machdep.cpu.family/model/stepping/signature are ints decoded from CPUID
++ * leaf 1: family is the base family (6 for every Intel Core), model folds in
++ * the extended model (158 = 0x9E for Coffee Lake-H), signature is raw EAX.
++ * The per-prefix identity overrides them so they match machdep.cpu.brand_string.
++ */
++static unsigned int host_cpu_signature(void)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
++	setup(1);
++	__cpuid(eax, eax, ebx, ecx, edx);
++	(void) level;
++	return eax;
++}
+ 
+-    eax = eax >> 7;
+-    eax &= 15;
++static unsigned int identity_cpu_signature(void)
++{
++	unsigned long long value;
++	if (darling_runtime_identity_u64("machdep.cpu.signature", &value))
++		return (unsigned int) value;
++	return host_cpu_signature();
++}
+ 
+-    copyout_int(eax, old, oldlen);
++static long copyout_cpu_int(const char* key, unsigned int fallback, void* old, unsigned long* oldlen)
++{
++	unsigned long long value;
++	if (darling_runtime_identity_u64(key, &value))
++		fallback = (unsigned int) value;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = (int) fallback;
++	return 0;
++}
+ 
+-    return 0;
++sysctl_handler(handle_family)
++{
++	unsigned int signature = identity_cpu_signature();
++	return copyout_cpu_int("machdep.cpu.family", (signature >> 8) & 0xf, old, oldlen);
+ }
+ 
+ sysctl_handler(handle_model)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax = eax >> 3;
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
+-
+-    return 0;
++	unsigned int signature = identity_cpu_signature();
++	unsigned int family = (signature >> 8) & 0xf;
++	unsigned int model = (signature >> 4) & 0xf;
++	if (family == 6 || family == 15)
++		model |= ((signature >> 16) & 0xf) << 4;
++	return copyout_cpu_int("machdep.cpu.model", model, old, oldlen);
+ }
+ 
+ sysctl_handler(handle_stepping)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
++	return copyout_cpu_int("machdep.cpu.stepping", identity_cpu_signature() & 0xf, old, oldlen);
++}
+ 
+-    return 0;
++sysctl_handler(handle_signature)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = (int) identity_cpu_signature();
++	return 0;
  }
  
 +// Original cpuid-based implementation, replaced by the fixed brand string defined above
@@ -2477,7 +2670,7 @@ index 4319355..122ad3a 100644
  
  sysctl_handler(handle_features)
  {
-@@ -269,45 +277,54 @@ sysctl_handler(handle_features)
+@@ -269,45 +307,66 @@ sysctl_handler(handle_features)
  // TODO: i doubt core count is ever going to change.
  //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
  sysctl_handler(handle_core_count) {
@@ -2489,6 +2682,18 @@ index 4319355..122ad3a 100644
 +	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
 +	size_t core_count = (topo->detected && !topo->fixed) ? topo->physical_online : 0;
 +	int infofd = -1;
++	unsigned long long threads_per_core;
++
++	/* A configured Mac CPU model reports its own SMT ratio over the real
++	 * logical CPU count, so cores and threads stay consistent with the brand. */
++	if (topo->detected && !topo->fixed &&
++		darling_runtime_identity_u64("cpu.threads_per_core", &threads_per_core) &&
++		threads_per_core >= 1 && threads_per_core <= 8)
++	{
++		core_count = topo->online / threads_per_core;
++		if (core_count == 0)
++			core_count = 1;
++	}
  
 -	int infofd = sys_open_nocancel("/proc/cpuinfo", BSD_O_RDONLY, 0);
 -	struct rdline_buffer rbuf;
@@ -2561,7 +2766,7 @@ index 4319355..122ad3a 100644
  	}
  
  out:
-@@ -319,3 +336,21 @@ out:
+@@ -319,3 +378,21 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -8151,4 +8356,116 @@ index 0000000..04d64c1
 +    ops->close((int)target);
 +    return error;
 +}
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h b/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h
+new file mode 100644
+index 0000000..8182e72
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h
+@@ -0,0 +1,106 @@
++#ifndef DARLING_COMMON_RUNTIME_IDENTITY_H
++#define DARLING_COMMON_RUNTIME_IDENTITY_H
++
++#include <stdbool.h>
++#include <stddef.h>
++
++/*
++ * Per-prefix compatibility identity.  The file is deliberately a tiny,
++ * bounded key/value format so libsystem_kernel can read it before libc is
++ * fully available.  configure-darling-platform.py validates and atomically
++ * writes every value; malformed or missing data falls back to the compiled
++ * Darling defaults.
++ */
++#define DARLING_RUNTIME_IDENTITY_PATH "/private/etc/darling-runtime-identity.conf"
++#define DARLING_RUNTIME_IDENTITY_MAX 1024
++
++bool read_string(const char* path, char* dst, int maxlen);
++
++static inline bool darling_runtime_identity_value(const char* key, char* value, size_t capacity)
++{
++	char data[DARLING_RUNTIME_IDENTITY_MAX];
++	const char* line;
++	size_t key_length = 0;
++
++	if (capacity == 0 || !read_string(DARLING_RUNTIME_IDENTITY_PATH, data, sizeof(data)))
++		return false;
++	while (key[key_length])
++		key_length++;
++
++	line = data;
++	while (*line)
++	{
++		const char* end = line;
++		const char* source;
++		size_t length = 0;
++
++		while (*end && *end != '\n' && *end != '\r')
++			end++;
++		if ((size_t)(end - line) > key_length && line[key_length] == '=')
++		{
++			size_t i;
++			for (i = 0; i < key_length && line[i] == key[i]; i++) {}
++			if (i == key_length)
++			{
++				source = line + key_length + 1;
++				length = (size_t)(end - source);
++				if (length == 0 || length >= capacity)
++					return false;
++				for (i = 0; i < length; i++)
++				{
++					unsigned char c = (unsigned char)source[i];
++					if (c < 0x20 || c > 0x7e || c == '=')
++						return false;
++					value[i] = (char)c;
++				}
++				value[length] = '\0';
++				return true;
++			}
++		}
++		line = end;
++		while (*line == '\n' || *line == '\r')
++			line++;
++	}
++	return false;
++}
++
++/*
++ * Numeric identity value: decimal or 0x-prefixed hexadecimal, at most 64 bits.
++ * Returns false (leaving *out untouched) when the key is absent or malformed.
++ */
++static inline bool darling_runtime_identity_u64(const char* key, unsigned long long* out)
++{
++	char text[32];
++	const char* p = text;
++	unsigned long long value = 0;
++	unsigned int base = 10;
++
++	if (!darling_runtime_identity_value(key, text, sizeof(text)))
++		return false;
++	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
++	{
++		base = 16;
++		p += 2;
++	}
++	if (*p == '\0')
++		return false;
++	for (; *p; p++)
++	{
++		unsigned int digit;
++		if (*p >= '0' && *p <= '9')
++			digit = (unsigned int)(*p - '0');
++		else if (base == 16 && *p >= 'a' && *p <= 'f')
++			digit = (unsigned int)(*p - 'a' + 10);
++		else if (base == 16 && *p >= 'A' && *p <= 'F')
++			digit = (unsigned int)(*p - 'A' + 10);
++		else
++			return false;
++		if (value > (~0ULL - digit) / base)
++			return false;
++		value = value * base + digit;
++	}
++	*out = value;
++	return true;
++}
++
 +#endif

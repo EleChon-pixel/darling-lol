@@ -1,4 +1,4 @@
-"""exec-guest.py: inherited descriptors and the opt-in host environment filter."""
+"""exec-guest.py: inherited descriptors and the default host environment allowlist."""
 import importlib.util
 import json
 import os
@@ -39,6 +39,10 @@ SESSION = {
     'FLATPAK_ID': 'x', 'SNAP': '/snap/x', 'APPIMAGE': '/x.AppImage', 'VIRTUAL_ENV': '/home/u/.venv',
     'COLORTERM': 'truecolor', 'VTE_VERSION': '7600', 'WINDOWID': '1', 'TERM_PROGRAM': 'vscode',
     'LS_COLORS': 'di=01;34', 'SHLVL': '2', 'BASH_FUNC_f%%': '() { :; }',
+    # Anything else a host exports, which a denylist cannot anticipate.
+    'CLAUDECODE': '1', 'COSMIC_PANEL_NAME': 'Dock', 'QSYS_ROOTDIR': '/home/u/altera/bin',
+    'LEAGUE_LINUX_HOME': '/home/u/.local/share/league-linux', 'XDG_DATA_HOME': '/home/u/.local/share',
+    'PKG_CONFIG_PATH': '/usr/lib/pkgconfig', 'LIBVIRT_DEFAULT_URI': 'qemu:///system', 'JOBS': '2',
 }
 
 
@@ -79,9 +83,10 @@ class ExecTests(unittest.TestCase):
                 os.close(fd)
         return json.loads(result.stdout)
 
-    def test_closes_descriptors_and_keeps_environment_by_default(self):
+    def test_opt_out_keeps_environment(self):
         environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish'}
-        child = self.run_helper(environ)
+        child = self.run_helper({**environ, 'RCLOL_FILTER_HOST_ENV': '0'})
+        self.assertNotIn('RCLOL_FILTER_HOST_ENV', child['env'])
         # The executed program may open descriptors during startup (the test
         # harness itself uses fd 3). The launcher contract is that descriptors
         # inherited from its parent are gone; fd 41 is the explicit leak above.
@@ -90,8 +95,8 @@ class ExecTests(unittest.TestCase):
         for name, value in environ.items():
             self.assertEqual(child['env'].get(name), value, name)
 
-    def test_opt_in_filter(self):
-        child = self.run_helper({**REQUIRED, **SESSION, 'SHELL': '/bin/fish', 'RCLOL_FILTER_HOST_ENV': '1'})
+    def test_filters_by_default(self):
+        child = self.run_helper({**REQUIRED, **SESSION, 'SHELL': '/bin/fish'})
         self.assertEqual(child['fds'][:3], [0, 1, 2])
         self.assertNotIn(41, child['fds'])
         self.assertFalse(set(SESSION) & set(child['env']))

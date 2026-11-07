@@ -17,6 +17,80 @@ MAX_SIZE = 65536
 BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
 KNOWN_SERIAL = 'C02ZL0GVMD6N'
 KNOWN_UUID = '6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B'
+# Each profile is one real Mac configuration. Every value a guest can query
+# (sysctl, IOKit, Metal, hostname) comes from the same profile so they agree.
+# CPU fields are the published CPUID leaf-1 signature and XNU's constants for
+# that microarchitecture (CPUFAMILY_INTEL_KABYLAKE covers Coffee/Comet Lake).
+HARDWARE_PROFILES = {
+    'macbookpro16,1': {
+        'model': 'MacBookPro16,1',
+        'manufacturer': 'Apple Inc.',
+        'cpu_vendor': 'GenuineIntel',
+        'cpu_brand': 'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz',
+        'cpu_signature': 0x906ED,      # family 6, model 158 (0x9E), stepping 13
+        'cpu_family_id': 0x0F817246,
+        'cpu_frequency': 2400000000,
+        'threads_per_core': 2,
+        'hostname': 'MacBook-Pro.local',
+        'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
+        'gpu_discrete': ('AMD Radeon Pro 5500M', 0x1002, 0x7340),
+        # 12-character serial layout: plant, year/half, week, unit, configuration.
+        # The 2019 16-inch MacBook Pro shipped late 2019 ('Z') through 2020 ('C', 'D')
+        # from the C02 plant with MD6x configuration codes.
+        'serial_plants': ('C02',),
+        'serial_halves': ('Z', 'C', 'D'),
+        'serial_configs': ('MD6M', 'MD6N', 'MD6R', 'MD6T', 'MD6V', 'MD6W'),
+    },
+    'imac20,1': {
+        'model': 'iMac20,1',
+        'manufacturer': 'Apple Inc.',
+        'cpu_vendor': 'GenuineIntel',
+        'cpu_brand': 'Intel(R) Core(TM) i5-10500 CPU @ 3.10GHz',
+        'cpu_signature': 0xA0653,      # family 6, model 165 (0xA5), stepping 3
+        'cpu_family_id': 0x0F817246,
+        'cpu_frequency': 3100000000,
+        'threads_per_core': 2,
+        'hostname': 'iMac.local',
+        'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x9BC8),
+        'gpu_discrete': ('AMD Radeon Pro 5300', 0x1002, 0x7340),
+    },
+}
+OS_PROFILES = {
+    # Released Intel-compatible Apple version/build pairs.  The build is part
+    # of the key so a product version can never silently drift to another
+    # point release.
+    'sonoma-14.7-23H124': {
+        'ProductName': 'macOS',
+        'ProductVersion': '14.7',
+        'ProductUserVisibleVersion': '14.7',
+        'ProductBuildVersion': '23H124',
+        'FullVersionString': 'Version 14.7 (Build 23H124)',
+    },
+    'sonoma-14.6.1-23G93': {
+        'ProductName': 'macOS',
+        'ProductVersion': '14.6.1',
+        'ProductUserVisibleVersion': '14.6.1',
+        'ProductBuildVersion': '23G93',
+        'FullVersionString': 'Version 14.6.1 (Build 23G93)',
+    },
+    'ventura-13.7-22H123': {
+        'ProductName': 'macOS',
+        'ProductVersion': '13.7',
+        'ProductUserVisibleVersion': '13.7',
+        'ProductBuildVersion': '22H123',
+        'FullVersionString': 'Version 13.7 (Build 22H123)',
+    },
+}
+RUNTIME_KEYS = ('hw.model', 'machdep.cpu.vendor', 'machdep.cpu.brand_string',
+                'kern.osproductversion', 'kern.osversion')
+# Written by current provisioning; older files without them stay valid and the
+# runtime falls back to host-derived values for anything missing.
+OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequency',
+                         'cpu.threads_per_core', 'kern.hostname',
+                         'gpu.integrated.name', 'gpu.integrated.vendor', 'gpu.integrated.device',
+                         'gpu.discrete.name', 'gpu.discrete.vendor', 'gpu.discrete.device',
+                         'home.isolated')
+ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
 BYTES = {'ROM': 6, 'system-id': 16}
@@ -130,6 +204,74 @@ def checked_path(prefix, relative):
     return path
 
 
+def validate_runtime_string(name, value, limit=128):
+    if not isinstance(value, str) or not 1 <= len(value) <= limit:
+        raise ValueError(name + ' must be a non-empty string of at most %d characters' % limit)
+    if any(not 32 <= ord(c) <= 126 or c in '=\r\n' for c in value):
+        raise ValueError(name + ' must contain printable ASCII without equals or newlines')
+    return value
+
+
+def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_string=None,
+                     host_home_links=False):
+    selected = HARDWARE_PROFILES.get(hardware_profile) if hardware_profile else None
+    if selected is None:
+        selected = next((profile for profile in HARDWARE_PROFILES.values()
+                         if profile['model'] == properties.get('model')), HARDWARE_PROFILES['macbookpro16,1'])
+    values = {
+        'hw.model': properties.get('model', selected['model']),
+        'machdep.cpu.vendor': selected['cpu_vendor'],
+        'machdep.cpu.brand_string': cpu_brand_string or selected['cpu_brand'],
+        'kern.osproductversion': metadata['ProductVersion'],
+        'kern.osversion': metadata['ProductBuildVersion'],
+        'machdep.cpu.signature': '0x%X' % selected['cpu_signature'],
+        'hw.cpufamily': '0x%08X' % selected['cpu_family_id'],
+        'hw.cpufrequency': str(selected['cpu_frequency']),
+        'cpu.threads_per_core': str(selected['threads_per_core']),
+        'kern.hostname': selected['hostname'],
+    }
+    for slot in ('integrated', 'discrete'):
+        name, vendor, device = selected['gpu_' + slot]
+        values['gpu.%s.name' % slot] = name
+        values['gpu.%s.vendor' % slot] = '0x%04X' % vendor
+        values['gpu.%s.device' % slot] = '0x%04X' % device
+    # darlingserver links the host home and XDG folders into /Users/<name> unless the
+    # home is isolated; a Mac has no LinuxHome and no folders pointing at a host root.
+    values['home.isolated'] = '0' if host_home_links else '1'
+    for key in values:
+        validate_runtime_string(key, values[key])
+    return values
+
+
+def encode_runtime_identity(values):
+    if not set(RUNTIME_KEYS) <= set(values) <= set(ALL_RUNTIME_KEYS):
+        raise ValueError('Runtime identity requires the core keys and only supported optional keys')
+    lines = ['# Per-prefix runtime identity; generated by configure-darling-platform.py.']
+    lines.extend(key + '=' + validate_runtime_string(key, values[key])
+                 for key in ALL_RUNTIME_KEYS if key in values)
+    return ('\n'.join(lines) + '\n').encode()
+
+
+def load_runtime_identity_bytes(raw):
+    if len(raw) > MAX_SIZE:
+        raise ValueError('Runtime identity exceeds 64 KiB')
+    result = {}
+    for line in raw.decode('ascii').splitlines():
+        if not line or line.startswith('#'):
+            continue
+        key, separator, value = line.partition('=')
+        if not separator or key in result or key not in ALL_RUNTIME_KEYS:
+            raise ValueError('Malformed, duplicate, or unsupported runtime identity field')
+        result[key] = validate_runtime_string(key, value)
+    if not set(RUNTIME_KEYS) <= set(result):
+        raise ValueError('Runtime identity is incomplete')
+    return result
+
+
+def load_runtime_identity(path):
+    return load_runtime_identity_bytes(Path(path).read_bytes())
+
+
 def destination(prefix):
     return checked_path(prefix, 'private/etc/darling-platform.plist')
 
@@ -190,9 +332,23 @@ def has_known_defaults(properties):
             or properties.get('system-id') == uuid.UUID(KNOWN_UUID).bytes_le)
 
 
-def provision(properties, rom_oui=None):
+SERIAL_WEEKS = '123456789CDFGHJKLMNPQRTVWXY'  # Apple's week-of-half alphabet
+
+
+def profile_serial(profile):
+    """A serial with the layout real units of this model carry, or None if unknown."""
+    if not profile or 'serial_configs' not in profile:
+        return None
+    return (secrets.choice(profile['serial_plants']) + secrets.choice(profile['serial_halves']) +
+            secrets.choice(SERIAL_WEEKS) + ''.join(secrets.choice(BASE34) for _ in range(3)) +
+            secrets.choice(profile['serial_configs']))
+
+
+def provision(properties, rom_oui=None, hardware_profile=None, new_serial=False):
     """Fill missing identifiers, replacing only the two known shared defaults."""
     result = validate(properties)
+    if new_serial:
+        result.pop('IOPlatformSerialNumber', None)
     if result.get('IOPlatformSerialNumber') == KNOWN_SERIAL:
         result.pop('IOPlatformSerialNumber')
     if (result.get('IOPlatformUUID', '').upper() == KNOWN_UUID
@@ -201,6 +357,10 @@ def provision(properties, rom_oui=None):
         result.pop('IOPlatformUUID', None)
         result.pop('system-id', None)
         result.pop('provisioning_UDID', None)
+    if 'IOPlatformSerialNumber' not in result:
+        serial = profile_serial(HARDWARE_PROFILES.get(hardware_profile))
+        if serial:
+            result['IOPlatformSerialNumber'] = serial
     for key, length in [('IOPlatformSerialNumber', 12), ('mlb-serial-number', 17)]:
         if key not in result:
             result[key] = ''.join(secrets.choice(BASE34) for _ in range(length))
@@ -219,14 +379,19 @@ def provision(properties, rom_oui=None):
     return validate(result)
 
 
-def provisioning_files(prefix, properties, runtime_root):
+def provisioning_files(prefix, properties, runtime_root, hardware_profile=None,
+                       os_profile=None, cpu_brand_string=None, host_home_links=False):
     """Preflight every file before making any identity changes."""
     version = Path(runtime_root) / 'System/Library/CoreServices/SystemVersion.plist'
-    with version.open('rb') as stream:
-        raw = stream.read(MAX_SIZE + 1)
-    if len(raw) > MAX_SIZE:
-        raise ValueError('Runtime SystemVersion.plist exceeds 64 KiB')
-    metadata = plistlib.loads(raw)
+    if os_profile:
+        metadata = dict(OS_PROFILES[os_profile])
+        raw = plistlib.dumps(metadata, sort_keys=True)
+    else:
+        with version.open('rb') as stream:
+            raw = stream.read(MAX_SIZE + 1)
+        if len(raw) > MAX_SIZE:
+            raise ValueError('Runtime SystemVersion.plist exceeds 64 KiB')
+        metadata = plistlib.loads(raw)
     if not isinstance(metadata, dict) or any(not isinstance(metadata.get(key), str) or not metadata[key]
             for key in ('ProductName', 'ProductVersion', 'ProductBuildVersion')):
         raise ValueError('Runtime SystemVersion.plist is missing version metadata')
@@ -237,6 +402,9 @@ def provisioning_files(prefix, properties, runtime_root):
         lines.append(reverse[key] + '=' + shlex.quote(value))
     files = {
         'private/etc/darling-smbios.conf': ('\n'.join(lines) + '\n').encode(),
+        'private/etc/darling-runtime-identity.conf': encode_runtime_identity(
+            runtime_identity(properties, metadata, hardware_profile, cpu_brand_string,
+                             host_home_links)),
         'System/Library/CoreServices/SystemVersion.plist': raw,
         'private/etc/darling-platform.plist': plistlib.dumps({'schema': 1, 'properties': properties}, sort_keys=True),
     }
@@ -247,18 +415,24 @@ def provisioning_files(prefix, properties, runtime_root):
             if relative.endswith('darling-platform.plist'):
                 load(path)
             elif relative.endswith('.conf'):
-                load(path)
+                if relative.endswith('runtime-identity.conf'):
+                    load_runtime_identity(path)
+                else:
+                    load(path)
             else:
                 if not isinstance(plistlib.loads(path.read_bytes()), dict):
                     raise ValueError('Existing SystemVersion.plist is invalid')
     return files
 
 
-def save_provisioning(prefix, properties, runtime_root):
+def save_provisioning(prefix, properties, runtime_root, hardware_profile=None,
+                      os_profile=None, cpu_brand_string=None, host_home_links=False):
     ensure_stopped(prefix)
-    files = provisioning_files(prefix, properties, runtime_root)
+    files = provisioning_files(prefix, properties, runtime_root, hardware_profile,
+                               os_profile, cpu_brand_string, host_home_links)
     # Save the canonical identity first: an interrupted run reuses it on retry.
     order = ['private/etc/darling-platform.plist', 'private/etc/darling-smbios.conf',
+             'private/etc/darling-runtime-identity.conf',
              'System/Library/CoreServices/SystemVersion.plist']
     changed = False
     for relative in order:
@@ -283,6 +457,15 @@ def main(argv=None):
     parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE')
     parser.add_argument('--provision', action='store_true', help='Generate missing synthetic identifiers and provision prefix metadata')
     parser.add_argument('--runtime-root', type=Path, help='Runtime supplying SystemVersion.plist (default: saved SDK or /usr/local/libexec/darling)')
+    parser.add_argument('--hardware-profile', choices=sorted(HARDWARE_PROFILES),
+                        help='Select a validated Mac model and matching sysctl CPU identity')
+    parser.add_argument('--os-profile', choices=sorted(OS_PROFILES),
+                        help='Select a released macOS ProductVersion/ProductBuildVersion pair')
+    parser.add_argument('--cpu-brand-string', help='Override only machdep.cpu.brand_string (printable ASCII)')
+    parser.add_argument('--new-serial', action='store_true',
+                        help='Replace the saved serial with one laid out like the selected hardware profile\'s')
+    parser.add_argument('--host-home-links', action='store_true',
+                        help='Keep Darling\'s LinuxHome and Desktop/Documents/... links to the host home')
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
     parser.add_argument('--replace-known-defaults', action='store_true',
                         help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
@@ -292,6 +475,9 @@ def main(argv=None):
         if args.source or args.set:
             parser.error('--replace-known-defaults cannot be combined with --import or --set')
         args.provision = True
+    if (args.hardware_profile or args.os_profile or args.cpu_brand_string or args.host_home_links
+            or args.new_serial) and not args.provision:
+        parser.error('runtime identity profiles require --provision')
     config = Path(__file__).resolve().parents[1] / 'build/config.json'
     saved = json.loads(config.read_text()) if config.exists() else {}
     prefix = args.prefix or Path(os.environ.get('DPREFIX') or saved.get('prefix', str(Path.home() / '.darling')))
@@ -331,6 +517,11 @@ def main(argv=None):
                     properties.pop('system-id', None)
                     properties.pop('provisioning_UDID', None)
                 properties.update(incoming)
+            if args.hardware_profile:
+                hardware = HARDWARE_PROFILES[args.hardware_profile]
+                properties['model'] = hardware['model']
+                properties['product-name'] = hardware['model']
+                properties['manufacturer'] = hardware['manufacturer']
             for assignment in args.set:
                 key, sep, value = assignment.partition('=')
                 if not sep:
@@ -342,15 +533,24 @@ def main(argv=None):
                 properties[key] = value
             runtime_root = args.runtime_root or Path(saved.get('sdk', '/usr/local/libexec/darling'))
             if args.provision:
-                properties = provision(properties, rom_oui)
-                provisioning_files(prefix, properties, runtime_root)
+                properties = provision(properties, rom_oui, args.hardware_profile, args.new_serial)
+                files = provisioning_files(prefix, properties, runtime_root, args.hardware_profile,
+                                           args.os_profile, args.cpu_brand_string, args.host_home_links)
             else:
                 properties = validate(properties)
             if args.write:
-                changed = (save_provisioning(prefix, properties, runtime_root) if args.provision else save(prefix, properties))
+                changed = (save_provisioning(prefix, properties, runtime_root, args.hardware_profile,
+                                             args.os_profile, args.cpu_brand_string, args.host_home_links)
+                           if args.provision else save(prefix, properties))
                 print('Platform identity ' + ('saved' if changed else 'unchanged') + '; restart iokitd to apply.')
             else:
-                print(json.dumps({'schema': 1, 'properties': properties}, default=lambda value: value.hex().upper(), indent=2))
+                preview = {'schema': 1, 'properties': properties}
+                if args.provision:
+                    preview['runtimeIdentity'] = load_runtime_identity_bytes(
+                        files['private/etc/darling-runtime-identity.conf'])
+                    preview['systemVersion'] = plistlib.loads(
+                        files['System/Library/CoreServices/SystemVersion.plist'])
+                print(json.dumps(preview, default=lambda value: value.hex().upper(), indent=2))
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException, ExpatError) as error:
         parser.exit(1, str(error) + '\n')
     return 0
