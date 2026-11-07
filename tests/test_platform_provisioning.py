@@ -56,19 +56,89 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertIn('provisioning_UDID', preview['properties'])
         self.assertFalse(self.prefix.exists())
 
-    def test_write_three_files_idempotent_and_importable(self):
+    def test_write_four_files_idempotent_and_importable(self):
         self.run_cli('--write')
         canonical = platform.destination(self.prefix)
         legacy = self.prefix / 'private/etc/darling-smbios.conf'
         version = self.prefix / 'System/Library/CoreServices/SystemVersion.plist'
+        runtime_identity = self.prefix / 'private/etc/darling-runtime-identity.conf'
         self.assertEqual(platform.load(canonical), platform.load(legacy))
         self.assertEqual(version.read_bytes(), self.version.read_bytes())
-        files = [canonical, legacy, version]
+        values = platform.load_runtime_identity(runtime_identity)
+        self.assertEqual(values['hw.model'], 'MacBookPro16,1')
+        self.assertEqual(values['kern.osproductversion'], self.metadata['ProductVersion'])
+        self.assertEqual(values['kern.osversion'], self.metadata['ProductBuildVersion'])
+        files = [canonical, legacy, runtime_identity, version]
         snapshot = [(f.read_bytes(), f.stat().st_mtime_ns) for f in files]
         self.assertIn('unchanged', self.run_cli('--write').stdout)
         self.assertEqual(snapshot, [(f.read_bytes(), f.stat().st_mtime_ns) for f in files])
-        for f in [canonical, legacy]:
+        for f in [canonical, legacy, runtime_identity]:
             self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+
+    def test_named_hardware_and_os_profiles_are_consistent(self):
+        result = self.run_cli('--hardware-profile', 'imac20,1', '--os-profile',
+                              'sonoma-14.7-23H124', '--cpu-brand-string',
+                              'Fixture CPU 3.10GHz', '--write')
+        self.assertIn('saved', result.stdout)
+        properties = platform.load(platform.destination(self.prefix))
+        self.assertEqual(properties['model'], 'iMac20,1')
+        self.assertEqual(properties['product-name'], 'iMac20,1')
+        self.assertEqual(properties['manufacturer'], 'Apple Inc.')
+        runtime = platform.load_runtime_identity(
+            self.prefix / 'private/etc/darling-runtime-identity.conf')
+        self.assertEqual(runtime, {
+            'hw.model': 'iMac20,1',
+            'machdep.cpu.vendor': 'GenuineIntel',
+            'machdep.cpu.brand_string': 'Fixture CPU 3.10GHz',
+            'kern.osproductversion': '14.7',
+            'kern.osversion': '23H124',
+            'machdep.cpu.signature': '0xA0653',
+            'hw.cpufamily': '0x0F817246',
+            'hw.cpufrequency': '3100000000',
+            'cpu.threads_per_core': '2',
+            'kern.hostname': 'iMac.local',
+            'gpu.integrated.name': 'Intel UHD Graphics 630',
+            'gpu.integrated.vendor': '0x8086',
+            'gpu.integrated.device': '0x9BC8',
+            'gpu.discrete.name': 'AMD Radeon Pro 5300',
+            'gpu.discrete.vendor': '0x1002',
+            'gpu.discrete.device': '0x7340',
+            'home.isolated': '1',
+        })
+        version = plistlib.loads((self.prefix /
+            'System/Library/CoreServices/SystemVersion.plist').read_bytes())
+        self.assertEqual(version['ProductVersion'], runtime['kern.osproductversion'])
+        self.assertEqual(version['ProductBuildVersion'], runtime['kern.osversion'])
+        self.assertEqual(version['FullVersionString'], 'Version 14.7 (Build 23H124)')
+
+    def test_profile_serial_has_model_layout(self):
+        import re
+        for _ in range(50):
+            serial = platform.profile_serial(platform.HARDWARE_PROFILES['macbookpro16,1'])
+            self.assertRegex(serial, r'^C02[ZCD][1-9CDFGHJKLMNPQRTVWXY][0-9A-HJ-NP-Z]{3}MD6[MNRTVW]$')
+        self.assertIsNone(platform.profile_serial(platform.HARDWARE_PROFILES['imac20,1']))
+        saved = platform.provision({'IOPlatformSerialNumber': 'CH0N16UAJ1SR'}, None, 'macbookpro16,1')
+        self.assertEqual(saved['IOPlatformSerialNumber'], 'CH0N16UAJ1SR')
+        fresh = platform.provision({'IOPlatformSerialNumber': 'CH0N16UAJ1SR'}, None, 'macbookpro16,1', True)
+        self.assertTrue(re.match(r'^C02.{5}MD6.$', fresh['IOPlatformSerialNumber']))
+
+    def test_runtime_identity_accepts_files_without_optional_keys(self):
+        core = {'hw.model': 'MacBookPro16,1', 'machdep.cpu.vendor': 'GenuineIntel',
+                'machdep.cpu.brand_string': 'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz',
+                'kern.osproductversion': '14.7', 'kern.osversion': '23H124'}
+        self.assertEqual(platform.load_runtime_identity_bytes(platform.encode_runtime_identity(core)), core)
+        with self.assertRaises(ValueError):
+            platform.load_runtime_identity_bytes(b'hw.model=X\n')
+        with self.assertRaises(ValueError):
+            platform.encode_runtime_identity({**core, 'kern.bogus': '1'})
+
+    def test_runtime_profile_validation_fails_before_writes(self):
+        for brand in ('bad\nbrand', 'bad=brand', 'x' * 129):
+            result = subprocess.run([*self.command, '--hardware-profile', 'macbookpro16,1',
+                                     '--cpu-brand-string', brand, '--write'],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(platform.destination(self.prefix).exists())
 
     def test_known_defaults_replaced_and_custom_values_preserved(self):
         legacy = self.prefix / 'private/etc/darling-smbios.conf'

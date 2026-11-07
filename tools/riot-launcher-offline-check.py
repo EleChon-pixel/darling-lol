@@ -147,7 +147,7 @@ with open({str(log)!r}, "a") as output:
         clean = json.loads(log.read_text().splitlines()[-1])
         assert clean["flags"]["DYLD_INSERT_LIBRARIES"] is None
         assert clean["hud"] == {"MANGOHUD": None, "DISABLE_MANGOHUD": "1"}
-        # The opt-in host environment filter drops session metadata but never the launcher's GPU tuning.
+        # The host environment allowlist drops session metadata but never the launcher's GPU tuning.
         env.update({"RCLOL_FILTER_HOST_ENV": "1", "WAYLAND_DISPLAY": "wayland-0", "XAUTHORITY": "/tmp/xauth",
                     "DRI_PRIME": "1", "SHELL": "/bin/fish"})
         env.pop("MESA_NO_ERROR", None)

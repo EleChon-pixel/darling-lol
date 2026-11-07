@@ -1,49 +1,51 @@
 #!/usr/bin/env python3
 """Run a command without the host file descriptors this launcher inherited (anything above stderr).
 
-With RCLOL_FILTER_HOST_ENV=1 it also drops host desktop-session variables first (see
-host_session_variable). RCLOL_KEEP_HOST_ENV lists names to keep anyway, separated by spaces or commas.
+It also starts the guest from an allowlisted environment: only what Darling and the host
+libraries it loads into guest processes need (display, audio, GPU driver and loader
+variables) plus the variables a Mac session has. Everything else the desktop session,
+shell, terminal or service manager exported stays on the host. RCLOL_FILTER_HOST_ENV=0
+passes the host environment through unchanged; RCLOL_KEEP_HOST_ENV lists names to keep
+anyway, separated by spaces or commas.
 """
 import os
 import sys
 
-# Desktop-session, service-manager, terminal and packaging metadata that nothing in the guest reads.
-# Everything Darling and the host libraries it loads need is kept: DISPLAY, XAUTHORITY, XCURSOR_*,
-# XDG_RUNTIME_DIR, XDG_DATA_DIRS and the other XDG base directories (the Vulkan loader searches
-# them), DBUS_SESSION_BUS_ADDRESS, PULSE_*, PIPEWIRE_*, ALSA_*, DRI_PRIME, MESA_*, mesa_glthread,
-# __GL_*, __NV_*, __EGL_*, VK_*, LIBGL_*, LD_PRELOAD (gamemoderun) and LD_LIBRARY_PATH.
-SESSION_PREFIXES = (
-    'XDG_SESSION_', 'XDG_SEAT', 'XDG_VTNR', 'XDG_CURRENT_DESKTOP', 'XDG_MENU_PREFIX',
-    'GNOME_', 'KDE_', 'GDM', 'SSH_', 'SYSTEMD_', 'MEMORY_PRESSURE_', 'QT_', 'GTK_', 'GDK_',
-    'GIO_', 'GSETTINGS_', 'GJS_', 'FLATPAK_', 'SNAP_', 'KONSOLE_', 'TERM_PROGRAM', 'BASH_FUNC_',
-    # Host shell, prompt and developer-tool metadata. None of it exists on a Mac and
-    # several entries name Linux paths, so the guest must not inherit them.
-    'STARSHIP_', 'ILLOGICAL_IMPULSE_', 'INIR_', 'PNPM_', 'YARN_', 'npm_config_', 'PIP_',
-    'CARGO_', 'GIT_', 'LESS_TERMCAP_', '_P9K_', 'VSSCRIPT_', 'ORCA_', 'CLAUDE', 'TF_',
-    'CUDA_', 'COMPOSER_', 'DEBIAN_', 'FZF_', 'BAT_', 'MYSQL_', 'AWS_', 'LESS',
-    'CLOUDSDK_', 'GH_', 'GLAB_', 'HOMEBREW_', 'ELECTRON_', 'DELTA_', 'HIST', 'GPG_',
-)
-SESSION_NAMES = {
-    'WAYLAND_DISPLAY', 'DESKTOP_SESSION', 'DESKTOP_STARTUP_ID', 'SESSION_MANAGER',
-    'INVOCATION_ID', 'JOURNAL_STREAM', 'MANAGERPID', 'MANAGERPIDFDID', 'NOTIFY_SOCKET',
-    'LISTEN_FDS', 'LISTEN_PID', 'LISTEN_FDNAMES', 'COLORTERM', 'VTE_VERSION', 'WINDOWID',
-    'WINDOWPATH', 'CHROME_DESKTOP', 'NO_AT_BRIDGE', 'MOTD_SHOWN', 'SNAP', 'APPIMAGE', 'APPDIR',
-    'OWD', 'VIRTUAL_ENV', 'DEBUGINFOD_URLS', 'LS_COLORS', 'COLORFGBG', 'OLDPWD', 'SHLVL',
-    'AGENT', 'NO_COLOR', 'TERM', 'VISUAL', 'PROMPT_COMMAND', 'HISTFILE', 'HISTSIZE',
-    'SAVEHIST', 'HISTORY_IGNORE', 'PYTHONUNBUFFERED', 'LINES', 'COLUMNS', '_',
-    'CI', 'EDITOR', 'PAGER', 'GIT_PAGER', 'SYSTEMD_PAGER', 'MANPAGER',
+# Variables a Mac login session also has (SHELL and PATH are replaced below), and the
+# Darling loader's own.
+GUEST_NAMES = {
+    'HOME', 'USER', 'LOGNAME', 'LANG', 'TZ', 'TMPDIR', 'SHELL', 'PATH',
+    'DPREFIX', 'MAC_CHROMIUM_TMPDIR',
 }
+# Read on the host side of guest processes: X11, D-Bus, audio servers, the Vulkan/EGL/GL
+# loaders and drivers (they search XDG_DATA_DIRS/XDG_CONFIG_DIRS), glibc and fontconfig in
+# the Nix FHS environment, and gamemode's LD_PRELOAD.
+HOST_LIBRARY_NAMES = {
+    'DISPLAY', 'XAUTHORITY', 'XMODIFIERS', 'XDG_RUNTIME_DIR', 'XDG_DATA_DIRS',
+    'XDG_CONFIG_DIRS', 'XDG_CONFIG_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'LD_LIBRARY_PATH',
+    'LD_PRELOAD', 'LOCALE_ARCHIVE', 'FONTCONFIG_FILE', 'FONTCONFIG_PATH', 'EGL_PLATFORM',
+    'DRI_PRIME', 'mesa_glthread',
+}
+HOST_LIBRARY_PREFIXES = (
+    'LC_', 'MESA_', '__GL_', '__GLX_', '__NV_', '__VK_', 'VK_', '__EGL_', 'LIBGL_', 'PULSE_',
+    'PIPEWIRE_', 'ALSA_', 'XCURSOR_', 'RADV_', 'ANV_', 'NV_',
+    # Darling runtime and darling-lol knobs that guest-side frameworks read.
+    'DARLING_', 'RCLOL_', 'DYLD_',
+)
 GUEST_SHELL = '/bin/zsh'
+GUEST_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 
 
-def host_session_variable(name):
-    return name in SESSION_NAMES or name.startswith(SESSION_PREFIXES)
+def allowed_variable(name):
+    return name in GUEST_NAMES or name in HOST_LIBRARY_NAMES or name.startswith(HOST_LIBRARY_PREFIXES)
 
 
 def filter_host_environment(environ):
     """Return the names removed from environ (a mutable mapping), honoring RCLOL_KEEP_HOST_ENV."""
     keep = set(environ.get('RCLOL_KEEP_HOST_ENV', '').replace(',', ' ').split())
-    removed = sorted(name for name in environ if host_session_variable(name) and name not in keep)
+    environ.pop('RCLOL_KEEP_HOST_ENV', None)
+    environ.pop('RCLOL_FILTER_HOST_ENV', None)
+    removed = sorted(name for name in environ if not allowed_variable(name) and name not in keep)
     for name in removed:
         del environ[name]
     # The host login shell (for example /bin/fish) does not exist in the guest.
@@ -51,9 +53,7 @@ def filter_host_environment(environ):
         environ['SHELL'] = GUEST_SHELL
     # A host PATH names Linux directories; the guest always has the Mac layout.
     if 'PATH' not in keep:
-        environ['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin'
-    environ.pop('RCLOL_KEEP_HOST_ENV', None)
-    environ.pop('RCLOL_FILTER_HOST_ENV', None)
+        environ['PATH'] = GUEST_PATH
     return removed
 
 
@@ -75,8 +75,10 @@ def close_inherited_fds():
 def main(argv):
     if len(argv) < 2:
         sys.exit('usage: exec-guest.py COMMAND [ARGUMENT]...')
-    if os.environ.get('RCLOL_FILTER_HOST_ENV') == '1':
+    if os.environ.get('RCLOL_FILTER_HOST_ENV', '1') != '0':
         filter_host_environment(os.environ)
+    else:
+        os.environ.pop('RCLOL_FILTER_HOST_ENV', None)
     close_inherited_fds()
     os.execvp(argv[1], argv[1:])
 

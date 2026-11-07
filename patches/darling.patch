@@ -13673,3 +13673,69 @@ index 0000000..04d64c1
 +    return error;
 +}
 +#endif
+diff --git a/src/startup/darling.c b/src/startup/darling.c
+index a3f27fbf..68ef1c07 100644
+--- a/src/startup/darling.c
++++ b/src/startup/darling.c
+@@ -220,9 +220,7 @@ int main(int argc, char ** argv)
+ 			return 1;
+ 		}
+ 
+-		fullPath = malloc(strlen(SYSTEM_ROOT) + strlen(path) + 1);
+-		strcpy(fullPath, SYSTEM_ROOT);
+-		strcat(fullPath, path);
++		fullPath = guestPathForHostPath(path);
+ 		free(path);
+ 
+ 		argv[argvIndex] = fullPath;
+@@ -638,9 +636,35 @@ void setupShellspawnEnv(int sockfd)
+ 
+ void setupWorkingDir(int sockfd)
+ {
+-	char buffer2[4096];
+-	snprintf(buffer2, sizeof(buffer2), SYSTEM_ROOT "%s", g_workingDirectory);
+-	pushShellspawnCommand(sockfd, SHELLSPAWN_CHDIR, buffer2);
++	char* guestPath = guestPathForHostPath(g_workingDirectory);
++	pushShellspawnCommand(sockfd, SHELLSPAWN_CHDIR, guestPath);
++	free(guestPath);
++}
++
++// darling-lol: a host path inside the prefix is the guest path below the prefix
++// (prefix/Applications/X.app -> /Applications/X.app), as on a Mac; anything else is
++// only reachable through the host root volume. Programs started from the prefix
++// then see their real macOS location in argv[0], _NSGetExecutablePath and the
++// working directory instead of /Volumes/SystemRoot/<host home>/...
++char* guestPathForHostPath(const char* hostPath)
++{
++	char* result;
++	char* prefixPath = realpath(prefix, NULL);
++	size_t prefixLength = prefixPath ? strlen(prefixPath) : 0;
++
++	if (prefixLength > 1 && strncmp(hostPath, prefixPath, prefixLength) == 0 &&
++		(hostPath[prefixLength] == '/' || hostPath[prefixLength] == '\0'))
++	{
++		result = strdup(hostPath[prefixLength] ? hostPath + prefixLength : "/");
++	}
++	else
++	{
++		result = malloc(strlen(SYSTEM_ROOT) + strlen(hostPath) + 1);
++		strcpy(result, SYSTEM_ROOT);
++		strcat(result, hostPath);
++	}
++	free(prefixPath);
++	return result;
+ }
+ 
+ void setupIDs(int sockfd)
+diff --git a/src/startup/darling.h b/src/startup/darling.h
+index 1a49e2f5..48a5c735 100644
+--- a/src/startup/darling.h
++++ b/src/startup/darling.h
+@@ -43,6 +43,7 @@ void createDir(const char* path);
+ int connectToShellspawn(void);
+ void setupShellspawnEnv(int shellspawnFD);
+ void setupWorkingDir(int shellspawnFD);
++char* guestPathForHostPath(const char* hostPath);
+ void setupIDs(int shellspawnFD);
+ void setupFDs(int fds[3], int* master);
+ void spawnGo(int shellspawnFD, int fds[3], int master);
