@@ -47,6 +47,11 @@ static int __real_ioctl(int fd, int command, struct linux_ifreq *request) {
     assert(fd == 3 && command == LINUX_SIOCGIFFLAGS);
     request->lifr_flags = flags; return ioctl_result;
 }
+/* Mac names map back to the host's (sysctl_net.c): here en0 is the Wi-Fi wlan0. */
+static int darling_ifname_to_linux(const char *mac, char *linux_name) {
+    if (strcmp(mac, "en0") == 0) { strcpy(linux_name, "wlan0"); return 1; }
+    strncpy(linux_name, mac, LINUX_IFNAMSIZ - 1); return 0;
+}
 static int handle_socket(int fd, unsigned cmd, void *arg, int *retval) {
     switch (cmd) { case SIOCGIFMEDIA:
 ''' + handler + r'''
@@ -66,6 +71,9 @@ int main(void) {
     assert(result == 0 && request.ifm_count == 1 && request.ifm_ulist == list);
     assert(list[0] == IFM_ETHER && list[1] == -2);
     strcpy(request.ifm_name, "wlan0"); request.ifm_count = 1;
+    handle_socket(3, SIOCGIFMEDIA, &request, &result);
+    assert(result == 0 && list[0] == IFM_IEEE80211);
+    strcpy(request.ifm_name, "en0"); list[0] = -1;
     handle_socket(3, SIOCGIFMEDIA, &request, &result);
     assert(result == 0 && list[0] == IFM_IEEE80211);
     flags = 0;

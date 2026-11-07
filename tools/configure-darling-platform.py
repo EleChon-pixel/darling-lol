@@ -89,7 +89,7 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'cpu.threads_per_core', 'kern.hostname',
                          'gpu.integrated.name', 'gpu.integrated.vendor', 'gpu.integrated.device',
                          'gpu.discrete.name', 'gpu.discrete.vendor', 'gpu.discrete.device',
-                         'home.isolated')
+                         'home.isolated', 'host.hide', 'cpu.emulate_cpuid')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
@@ -213,7 +213,7 @@ def validate_runtime_string(name, value, limit=128):
 
 
 def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_string=None,
-                     host_home_links=False):
+                     host_home_links=False, show_host=False, host_cpuid=False):
     selected = HARDWARE_PROFILES.get(hardware_profile) if hardware_profile else None
     if selected is None:
         selected = next((profile for profile in HARDWARE_PROFILES.values()
@@ -238,6 +238,11 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
     # darlingserver links the host home and XDG folders into /Users/<name> unless the
     # home is isolated; a Mac has no LinuxHome and no folders pointing at a host root.
     values['home.isolated'] = '0' if host_home_links else '1'
+    # Applications see no /proc, /Volumes/SystemRoot, Linux mounts, Linux interface names
+    # or host-library environment variables (libsystem_kernel guest_view.c, mldr).
+    values['host.hide'] = '0' if show_host else '1'
+    # CPUID instructions report the profile's CPU (libsystem_kernel sigexc.c).
+    values['cpu.emulate_cpuid'] = '0' if host_cpuid else '1'
     for key in values:
         validate_runtime_string(key, values[key])
     return values
@@ -380,7 +385,8 @@ def provision(properties, rom_oui=None, hardware_profile=None, new_serial=False)
 
 
 def provisioning_files(prefix, properties, runtime_root, hardware_profile=None,
-                       os_profile=None, cpu_brand_string=None, host_home_links=False):
+                       os_profile=None, cpu_brand_string=None, host_home_links=False,
+                       show_host=False, host_cpuid=False):
     """Preflight every file before making any identity changes."""
     version = Path(runtime_root) / 'System/Library/CoreServices/SystemVersion.plist'
     if os_profile:
@@ -404,7 +410,7 @@ def provisioning_files(prefix, properties, runtime_root, hardware_profile=None,
         'private/etc/darling-smbios.conf': ('\n'.join(lines) + '\n').encode(),
         'private/etc/darling-runtime-identity.conf': encode_runtime_identity(
             runtime_identity(properties, metadata, hardware_profile, cpu_brand_string,
-                             host_home_links)),
+                             host_home_links, show_host, host_cpuid)),
         'System/Library/CoreServices/SystemVersion.plist': raw,
         'private/etc/darling-platform.plist': plistlib.dumps({'schema': 1, 'properties': properties}, sort_keys=True),
     }
@@ -426,10 +432,11 @@ def provisioning_files(prefix, properties, runtime_root, hardware_profile=None,
 
 
 def save_provisioning(prefix, properties, runtime_root, hardware_profile=None,
-                      os_profile=None, cpu_brand_string=None, host_home_links=False):
+                      os_profile=None, cpu_brand_string=None, host_home_links=False,
+                      show_host=False, host_cpuid=False):
     ensure_stopped(prefix)
     files = provisioning_files(prefix, properties, runtime_root, hardware_profile,
-                               os_profile, cpu_brand_string, host_home_links)
+                               os_profile, cpu_brand_string, host_home_links, show_host, host_cpuid)
     # Save the canonical identity first: an interrupted run reuses it on retry.
     order = ['private/etc/darling-platform.plist', 'private/etc/darling-smbios.conf',
              'private/etc/darling-runtime-identity.conf',
@@ -464,6 +471,10 @@ def main(argv=None):
     parser.add_argument('--cpu-brand-string', help='Override only machdep.cpu.brand_string (printable ASCII)')
     parser.add_argument('--new-serial', action='store_true',
                         help='Replace the saved serial with one laid out like the selected hardware profile\'s')
+    parser.add_argument('--show-host', action='store_true',
+                        help='Let applications see /proc, /Volumes/SystemRoot, Linux mounts, interface names and host-library variables')
+    parser.add_argument('--host-cpuid', action='store_true',
+                        help='Leave CPUID instructions reporting the host CPU (no CPUID faulting)')
     parser.add_argument('--host-home-links', action='store_true',
                         help='Keep Darling\'s LinuxHome and Desktop/Documents/... links to the host home')
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
@@ -476,7 +487,7 @@ def main(argv=None):
             parser.error('--replace-known-defaults cannot be combined with --import or --set')
         args.provision = True
     if (args.hardware_profile or args.os_profile or args.cpu_brand_string or args.host_home_links
-            or args.new_serial) and not args.provision:
+            or args.new_serial or args.show_host or args.host_cpuid) and not args.provision:
         parser.error('runtime identity profiles require --provision')
     config = Path(__file__).resolve().parents[1] / 'build/config.json'
     saved = json.loads(config.read_text()) if config.exists() else {}
@@ -535,12 +546,14 @@ def main(argv=None):
             if args.provision:
                 properties = provision(properties, rom_oui, args.hardware_profile, args.new_serial)
                 files = provisioning_files(prefix, properties, runtime_root, args.hardware_profile,
-                                           args.os_profile, args.cpu_brand_string, args.host_home_links)
+                                           args.os_profile, args.cpu_brand_string, args.host_home_links,
+                                           args.show_host, args.host_cpuid)
             else:
                 properties = validate(properties)
             if args.write:
                 changed = (save_provisioning(prefix, properties, runtime_root, args.hardware_profile,
-                                             args.os_profile, args.cpu_brand_string, args.host_home_links)
+                                             args.os_profile, args.cpu_brand_string, args.host_home_links,
+                                             args.show_host, args.host_cpuid)
                            if args.provision else save(prefix, properties))
                 print('Platform identity ' + ('saved' if changed else 'unchanged') + '; restart iokitd to apply.')
             else:

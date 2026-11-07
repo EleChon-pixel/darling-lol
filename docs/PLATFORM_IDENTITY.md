@@ -69,6 +69,8 @@ a matching `SystemVersion.plist`:
 | `kern.hostname` | darlingserver sets it in the container's UTS namespace (`uname`, `gethostname`, `kern.hostname`) | `MacBook-Pro.local` |
 | `gpu.integrated.*`, `gpu.discrete.*` | iokitd `IOPCIDevice` entries, Metal `MTLDevice.name`, system_profiler | Intel UHD Graphics 630 `8086:3E9B`, AMD Radeon Pro 5500M `1002:7340` |
 | `home.isolated` | darlingserver: no `LinuxHome`, and `Desktop`, `Documents`, ... are prefix-local folders, not links into `/Volumes/SystemRoot` | `1` (`--host-home-links` writes `0`) |
+| `host.hide` | libsystem_kernel (`guest_view.c`, `sysctl_net.c`, `execve.c`), mldr, libc `getenv` | `1` (`--show-host` writes `0`) |
+| `cpu.emulate_cpuid` | libsystem_kernel `sigexc.c` | `1` (`--host-cpuid` writes `0`) |
 
 Logical CPU counts stay the host's, since the clients size worker pools from
 them; physical counts follow the profile's SMT ratio. With a profile, a host
@@ -79,8 +81,45 @@ late-2019/2020 year and week characters, an `MD6x` configuration code); without
 it an existing serial is kept, so the identity stays stable across runs.
 
 A stopped prefix is required, and changes take effect when its processes start
-again. Direct x86 `CPUID` instructions still report the host CPU: Darling
-translates system calls, it does not virtualize the processor.
+again.
+
+### What applications see of the host
+
+With `host.hide=1`, processes whose executable lives under `/Applications` or
+`/Users` (Darling's own daemons and tools are exempt; they read the host for the
+guest):
+
+- **Paths.** Lookups that resolve into the host root or Linux `/proc` fail with
+  `ENOENT`: `/proc`, `/Volumes/SystemRoot/...`, `/dev/../etc/...`. The exceptions are
+  the host files Darling links into the guest (`/dev`, `/etc/localtime`,
+  `/etc/resolv.conf` and its resolver target, `/etc/nsswitch.conf`,
+  `/etc/machine-id`, `/usr/share/zoneinfo`), `/proc/self/fd` (behind `/dev/fd`),
+  CoreVideo's `/proc/self/mem` writer and the host `xdg-open` LaunchServices runs.
+  `/dev` and Darling's other links into the host stat and readlink as the files and
+  directories they are on a Mac. Listings of `/` and `/Volumes` omit `proc`,
+  `SystemRoot`, `DarlingEmulatedDrive` and Darling's prefix files; new links into
+  the host root are refused. Only system calls made by guest code are checked
+  (the wrappers sit in the BSD syscall table); libsystem_kernel's internal host
+  reads are unaffected.
+- **Mounts.** `getfsstat`/`statfs` report one APFS volume (`/dev/disk1s1` on `/`)
+  and `devfs` on `/dev`.
+- **Network interfaces.** `lo0`; Wi-Fi first, then wired NICs, as `en0`, `en1`, ...;
+  VPN tunnels (Tailscale, WireGuard, tun) as `utunN`; bridges, container and VM
+  interfaces are left out. `SIOCGIFMEDIA` maps the Mac names back.
+- **Environment.** mldr leaves host-only variables (X11, Mesa/Vulkan/NVIDIA,
+  audio, D-Bus, `XDG_*`, `LD_*`, fontconfig, `DARLING_*`, `RCLOL_*`, `__mldr_*`; the
+  list is `include/common/host_env.h`) out of every guest process's `environ`.
+  The host libraries in the process keep reading them from the Linux side, libc
+  `getenv` still answers them for Darling's frameworks, and `execve` passes them on
+  to children.
+
+With `cpu.emulate_cpuid=1` each guest process enables Linux CPUID faulting. A
+`CPUID` instruction then traps (about 2 µs instead of ~0.1 µs) and returns the
+host's values with the identity leaves replaced: the leaf-1 signature, the hybrid
+flag, leaf 0x16 frequencies, leaf 0x1A core type and the brand string. Feature
+bits stay the host's. This needs a CPU and kernel with CPUID faulting
+(`cpuid_fault` in `/proc/cpuinfo`); without it `CPUID` keeps reporting the host.
+
 
 Supported properties:
 

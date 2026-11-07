@@ -169,6 +169,14 @@
       ]
     },
     {
+      "path": "src/external/libc",
+      "revision": "5a38c8dabf9e76b39407c24bc13134e33e5594e6",
+      "repository": "https://github.com/darlinghq/darling-Libc.git",
+      "patch": "patches/libc.patch",
+      "modified_files": 1,
+      "new_files": []
+    },
+    {
       "path": "src/external/libcxxabi",
       "revision": "c9c851718eb304a9aefa097aeaaf8c3bd1dff1bc",
       "repository": "https://github.com/darlinghq/darling-libcxxabi.git",
@@ -318,7 +326,10 @@
         "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
         "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
-        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c",
+        "darling/src/libsystem_kernel/emulation/include/common/host_env.h",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c"
       ]
     },
     {

@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..5a1bed9 100644
+index 5b2e765..c9f7571 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -52,7 +52,15 @@ index 5b2e765..5a1bed9 100644
  
  # include src/startup for rtsig.h
  include_directories(
-@@ -134,6 +133,7 @@ set(xnu_syscall_bsd_sources
+@@ -103,6 +102,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_net.c
++	src/xnu_syscall/bsd/helper/misc/guest_view.c
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
+ 	src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
+@@ -134,6 +134,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_kqueue_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_open_np.c
@@ -60,7 +68,7 @@ index 5b2e765..5a1bed9 100644
  	src/xnu_syscall/bsd/impl/hfs/stub.c
  	src/xnu_syscall/bsd/impl/ioctl/ioctl.c
  	src/xnu_syscall/bsd/impl/kqueue/kevent.c
-@@ -144,6 +144,7 @@ set(xnu_syscall_bsd_sources
+@@ -144,6 +145,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/clonefile.c
  	src/xnu_syscall/bsd/impl/misc/csops.c
  	src/xnu_syscall/bsd/impl/misc/csrctl.c
@@ -68,7 +76,7 @@ index 5b2e765..5a1bed9 100644
  	src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
  	src/xnu_syscall/bsd/impl/misc/fileport_makeport.c
  	src/xnu_syscall/bsd/impl/misc/fsgetpath.c
-@@ -153,6 +154,7 @@ set(xnu_syscall_bsd_sources
+@@ -153,6 +155,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/getrlimit.c
  	src/xnu_syscall/bsd/impl/misc/getrusage.c
  	src/xnu_syscall/bsd/impl/misc/iopolicysys.c
@@ -76,7 +84,7 @@ index 5b2e765..5a1bed9 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -162,6 +164,7 @@ set(xnu_syscall_bsd_sources
+@@ -162,6 +165,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/syscall.c
  	src/xnu_syscall/bsd/impl/misc/sysctl.c
  	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
@@ -84,7 +92,7 @@ index 5b2e765..5a1bed9 100644
  	src/xnu_syscall/bsd/impl/mman/madvise.c
  	src/xnu_syscall/bsd/impl/mman/mman.c
  	src/xnu_syscall/bsd/impl/mman/msync.c
-@@ -359,6 +362,11 @@ set(emulation_sources
+@@ -359,6 +363,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -1604,10 +1612,19 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..1a763fe 100644
+index 206e92e..928182d 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-@@ -151,8 +151,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -6,6 +6,8 @@
+ #include <_libkernel_init.h>
+ 
+ #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaction.h>
++#include <darling/emulation/common/runtime_identity.h>
++#include <stdbool.h>
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/exit.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+@@ -151,8 +153,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  	int status = dserver_rpc_interrupt_enter();
  
  	if (status != 0) {
@@ -1623,7 +1640,152 @@ index 206e92e..1a763fe 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +272,165 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -197,8 +204,144 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+ }
+ 
+ 
++#ifdef __x86_64__
++/*
++ * darling-lol: CPUID as the configured Mac CPU.
++ *
++ * sysctl reports the hardware profile's CPU, but code can execute CPUID directly and
++ * read the host's (e.g. "12th Gen Intel(R) Core(TM) i5-12500H", family 6 model 154,
++ * hybrid). With cpu.emulate_cpuid=1 every guest process enables Linux CPUID faulting
++ * (ARCH_SET_CPUID 0, inherited by its threads and reset on exec). A CPUID then raises
++ * SIGSEGV here: the real values are read with faulting briefly off, and the
++ * identity-bearing leaves are replaced: leaf 1 EAX (signature), leaf 7 EDX bit 15
++ * (hybrid), leaf 0x16 (frequencies), leaf 0x1A (core type) and the brand string.
++ * Feature bits stay the host's, since code depends on them being truthful.
++ */
++#define LINUX_ARCH_SET_CPUID 0x1012
++#define LINUX_SI_KERNEL 0x80
++
++struct cpuid_identity
++{
++	bool faulting;
++	bool configured;
++	unsigned int signature;
++	unsigned int base_mhz;
++	unsigned int brand[12];
++};
++static struct cpuid_identity cpuid_identity;
++
++static void cpuid_identity_setup(void)
++{
++	char data[DARLING_RUNTIME_IDENTITY_MAX];
++	char value[64];
++	unsigned long long frequency = 0;
++
++	if (!__darling_identity_load(data, sizeof(data)) || !darling_identity_flag(data, "cpu.emulate_cpuid"))
++		return;
++	if (darling_identity_lookup(data, "machdep.cpu.signature", value, sizeof(value)))
++	{
++		unsigned long long sig = 0;
++		const char* p = value;
++		unsigned int base = 10;
++		if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
++		for (; *p; p++)
++		{
++			unsigned int digit = (*p >= '0' && *p <= '9') ? (unsigned)(*p - '0') :
++				(*p >= 'a' && *p <= 'f') ? (unsigned)(*p - 'a' + 10) :
++				(*p >= 'A' && *p <= 'F') ? (unsigned)(*p - 'A' + 10) : 99;
++			if (digit >= base) { sig = 0; break; }
++			sig = sig * base + digit;
++		}
++		cpuid_identity.signature = (unsigned int) sig;
++	}
++	if (darling_identity_lookup(data, "hw.cpufrequency", value, sizeof(value)))
++	{
++		for (const char* p = value; *p >= '0' && *p <= '9'; p++)
++			frequency = frequency * 10 + (unsigned)(*p - '0');
++		cpuid_identity.base_mhz = (unsigned int)(frequency / 1000000);
++	}
++	if (!darling_identity_lookup(data, "machdep.cpu.brand_string", value, sizeof(value)))
++		return;
++	char* brand = (char*) cpuid_identity.brand;
++	for (int i = 0; i < 48; i++)
++		brand[i] = 0;
++	for (int i = 0; i < 47 && value[i]; i++)
++		brand[i] = value[i];
++	if (cpuid_identity.signature == 0)
++		return;
++	cpuid_identity.configured = true;
++	cpuid_identity.faulting = LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 0) == 0;
++}
++
++static bool emulate_cpuid(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
++{
++	unsigned char insn[2];
++	struct { void* base; unsigned long length; } local = { insn, 2 }, remote;
++	unsigned int a, b, c, d, leaf, subleaf;
++
++	if (linux_signum != LINUX_SIGSEGV || !cpuid_identity.faulting || info->si_code != LINUX_SI_KERNEL)
++		return false;
++	/* Read the faulting instruction without risking a second fault in the handler. */
++	remote.base = (void*) ctxt->uc_mcontext.gregs.rip;
++	remote.length = 2;
++	if (LINUX_SYSCALL(__NR_process_vm_readv, LINUX_SYSCALL(__NR_getpid), &local, 1, &remote, 1, 0) != 2)
++		return false;
++	if (insn[0] != 0x0f || insn[1] != 0xa2)
++		return false;
++
++	leaf = (unsigned int) ctxt->uc_mcontext.gregs.rax;
++	subleaf = (unsigned int) ctxt->uc_mcontext.gregs.rcx;
++	LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 1);
++	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "0"(leaf), "2"(subleaf));
++	LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 0);
++
++	switch (leaf)
++	{
++	case 1:
++		a = cpuid_identity.signature;
++		break;
++	case 7:
++		if (subleaf == 0)
++			d &= ~(1u << 15); /* not a hybrid part */
++		break;
++	case 0x16:
++		if (cpuid_identity.base_mhz)
++		{
++			a = cpuid_identity.base_mhz;
++			b = cpuid_identity.base_mhz;
++			c = 100;
++		}
++		break;
++	case 0x1a:
++		a = b = c = d = 0;
++		break;
++	case 0x80000002:
++	case 0x80000003:
++	case 0x80000004:
++	{
++		const unsigned int* words = cpuid_identity.brand + (leaf - 0x80000002) * 4;
++		a = words[0]; b = words[1]; c = words[2]; d = words[3];
++		break;
++	}
++	}
++	ctxt->uc_mcontext.gregs.rax = a;
++	ctxt->uc_mcontext.gregs.rbx = b;
++	ctxt->uc_mcontext.gregs.rcx = c;
++	ctxt->uc_mcontext.gregs.rdx = d;
++	ctxt->uc_mcontext.gregs.rip += 2;
++	return true;
++}
++#endif
++
+ void darling_sigexc_self(void)
+ {
++#ifdef __x86_64__
++	/* Before the handlers exist nothing faults; enabling after would leave a window
++	 * where CPUID traps into an uninitialized identity. */
++	if (!cpuid_identity.faulting)
++		cpuid_identity_setup();
++#endif
++
+ 	am_i_ptraced = true;
+ 
+ 	__simple_kprintf("darling_sigexc_self()\n");
+@@ -267,13 +410,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1716,6 +1878,11 @@ index 206e92e..1a763fe 100644
 +
  void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
  {
++#ifdef __x86_64__
++	/* Emulated CPUID never reaches darlingserver or the guest's handlers. */
++	if (emulate_cpuid(linux_signum, info, ctxt))
++		return;
++#endif
  	int status = dserver_rpc_interrupt_enter();
 +	if (forward_native_resize_signal(linux_signum, status))
 +		return;
@@ -1790,7 +1957,7 @@ index 206e92e..1a763fe 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +516,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +659,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -1891,10 +2058,16 @@ index a26ae39..3105366 100644
  Lexit_hook:
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
-index 7d5ef80..c8672bb 100644
+index 7d5ef80..76fb069 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
-@@ -24,6 +24,7 @@
+@@ -1,4 +1,5 @@
+ #include <darling/emulation/xnu_syscall/bsd/bsd_syscall_table.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
+ 
+ #include <darling/emulation/xnu_syscall/bsd/impl/audit/audit_addr.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/audit/audit_session_join.h>
+@@ -24,6 +25,7 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/openat.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/guarded/guarded_close_np.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/guarded/guarded_kqueue_np.h>
@@ -1902,7 +2075,7 @@ index 7d5ef80..c8672bb 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/guarded/guarded_open_np.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/hfs/stub.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
-@@ -44,6 +45,7 @@
+@@ -44,6 +46,7 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrlimit.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrusage.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/iopolicysys.h>
@@ -1910,7 +2083,7 @@ index 7d5ef80..c8672bb 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
-@@ -53,6 +55,7 @@
+@@ -53,6 +56,7 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/syscall.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/sysctl.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfid.h>
@@ -1918,7 +2091,134 @@ index 7d5ef80..c8672bb 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/mman/madvise.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/mman/msync.h>
-@@ -427,6 +430,7 @@ void* __bsd_syscall_table[600] = {
+@@ -223,17 +227,17 @@ void* __bsd_syscall_table[600] = {
+ 	[2] = sys_fork,
+ 	[3] = sys_read,
+ 	[4] = sys_write,
+-	[5] = sys_open,
++	[5] = guarded_open,
+ 	[6] = sys_close,
+ 	[7] = sys_wait4,
+ 	[9] = sys_link,
+ 	[10] = sys_unlink,
+-	[12] = sys_chdir,
++	[12] = guarded_chdir,
+ 	[13] = sys_fchdir,
+ 	[14] = sys_mknod,
+ 	[15] = sys_chmod,
+ 	[16] = sys_chown,
+-	[18] = sys_getfsstat,
++	[18] = guarded_getfsstat,
+ 	[20] = sys_getpid,
+ 	[23] = sys_setuid,
+ 	[24] = sys_getuid,
+@@ -245,7 +249,7 @@ void* __bsd_syscall_table[600] = {
+ 	[30] = sys_accept,
+ 	[31] = sys_getpeername,
+ 	[32] = sys_getsockname,
+-	[33] = sys_access,
++	[33] = guarded_access,
+ 	[34] = sys_chflags,
+ 	[35] = sys_fchflags,
+ 	[36] = sys_sync,
+@@ -263,9 +267,9 @@ void* __bsd_syscall_table[600] = {
+ 	[53] = sys_sigaltstack,
+ 	[54] = sys_ioctl,
+ 	[55] = sys_reboot,
+-	[57] = sys_symlink,
+-	[58] = sys_readlink,
+-	[59] = sys_execve,
++	[57] = guarded_symlink,
++	[58] = guarded_readlink,
++	[59] = guarded_execve,
+ 	[60] = sys_umask,
+ 	[61] = sys_chroot,
+ 	[65] = sys_msync,
+@@ -315,8 +319,8 @@ void* __bsd_syscall_table[600] = {
+ 	[151] = sys_getpgid,
+ 	[153] = sys_pread,
+ 	[154] = sys_pwrite,
+-	[157] = sys_statfs,
+-	[158] = sys_fstatfs,
++	[157] = guarded_statfs,
++	[158] = guarded_fstatfs,
+ 	[159] = sys_unmount,
+ 	[169] = sys_csops,
+ 	[170] = sys_csops_audittoken,
+@@ -326,14 +330,14 @@ void* __bsd_syscall_table[600] = {
+ 	[183] = sys_seteuid,
+ 	[184] = sys_sigreturn,
+ 	[187] = sys_fdatasync,
+-	[188] = sys_stat,
++	[188] = guarded_stat,
+ 	[189] = sys_fstat,
+-	[190] = sys_lstat,
+-	[191] = sys_pathconf,
++	[190] = guarded_lstat,
++	[191] = guarded_pathconf,
+ 	[192] = sys_fpathconf,
+ 	[194] = sys_getrlimit,
+ 	[195] = sys_setrlimit,
+-	[196] = sys_getdirentries,
++	[196] = guarded_getdirentries,
+ 	[197] = sys_mmap,
+ 	[199] = sys_lseek,
+ 	[200] = sys_truncate,
+@@ -345,7 +349,7 @@ void* __bsd_syscall_table[600] = {
+ 	[217] = sys_statv,
+ 	[218] = sys_lstatv,
+ 	[219] = sys_fstatv,
+-	[220] = sys_getattrlist,
++	[220] = guarded_getattrlist,
+ 	[221] = sys_setattrlist,
+ 	[222] = sys_getdirentriesattr,
+ 	[223] = sys_exchangedata,
+@@ -355,16 +359,16 @@ void* __bsd_syscall_table[600] = {
+ 	[228] = sys_fgetattrlist,
+ 	[229] = sys_fsetattrlist,
+ 	[230] = sys_poll,
+-	[234] = sys_getxattr,
++	[234] = guarded_getxattr,
+ 	[235] = sys_fgetxattr,
+ 	[236] = sys_setxattr,
+ 	[237] = sys_fsetxattr,
+ 	[238] = sys_removexattr,
+ 	[239] = sys_fremovexattr,
+-	[240] = sys_listxattr,
++	[240] = guarded_listxattr,
+ 	[241] = sys_flistxattr,
+ 	[243] = sys_initgroups,
+-	[244] = sys_posix_spawn,
++	[244] = guarded_posix_spawn,
+ 	[254] = sys_semctl,
+ 	[255] = sys_semget,
+ 	[256] = sys_semop,
+@@ -402,16 +406,16 @@ void* __bsd_syscall_table[600] = {
+ 	[333] = sys_pthread_canceled,
+ 	[334] = sys_semwait_signal,
+ 	[336] = sys_proc_info,
+-	[338] = sys_stat64,
++	[338] = guarded_stat64,
+ 	[339] = sys_fstat64,
+-	[340] = sys_lstat64,
+-	[341] = sys_stat64_extended,
+-	[342] = sys_lstat64_extended,
++	[340] = guarded_lstat64,
++	[341] = guarded_stat64_extended,
++	[342] = guarded_lstat64_extended,
+ 	[343] = sys_fstat64_extended,
+-	[344] = sys_getdirentries64,
+-	[345] = sys_statfs64,
+-	[346] = sys_fstatfs64,
+-	[347] = sys_getfsstat64,
++	[344] = guarded_getdirentries64,
++	[345] = guarded_statfs64,
++	[346] = guarded_fstatfs64,
++	[347] = guarded_getfsstat64,
+ 	[348] = sys_pthread_chdir,
+ 	[349] = sys_pthread_fchdir,
+ 	[357] = sys_getaudit_addr,
+@@ -427,11 +431,12 @@ void* __bsd_syscall_table[600] = {
  	[369] = sys_kevent64,
  	[372] = sys_thread_selfid,
  	[374] = sys_kevent_qos,
@@ -1926,17 +2226,41 @@ index 7d5ef80..c8672bb 100644
  	[394] = sys_pselect,
  	[395] = sys_pselect_nocancel,
  	[396] = sys_read_nocancel,
-@@ -462,6 +466,7 @@ void* __bsd_syscall_table[600] = {
+ 	[397] = sys_write_nocancel,
+-	[398] = sys_open_nocancel,
++	[398] = guarded_open_nocancel,
+ 	[399] = sys_close_nocancel,
+ 	[400] = sys_wait4_nocancel,
+ 	[401] = sys_recvmsg_nocancel,
+@@ -462,27 +467,30 @@ void* __bsd_syscall_table[600] = {
  	[441] = sys_guarded_open_np,
  	[442] = sys_guarded_close_np,
  	[443] = sys_guarded_kqueue_np,
 +	[444] = sys_change_fdguard_np,
  	[461] = sys_getattrlistbulk,
  	[462] = sys_clonefileat,
- 	[463] = sys_openat,
-@@ -479,10 +484,12 @@ void* __bsd_syscall_table[600] = {
+-	[463] = sys_openat,
+-	[464] = sys_openat_nocancel,
++	[463] = guarded_openat,
++	[464] = guarded_openat_nocancel,
+ 	[465] = sys_renameat,
+-	[466] = sys_faccessat,
++	[466] = guarded_faccessat,
+ 	[467] = sys_fchmodat,
+ 	[468] = sys_fchownat,
+-	[469] = sys_fstatat,
+-	[470] = sys_fstatat64,
++	[469] = guarded_fstatat,
++	[470] = guarded_fstatat64,
+ 	[471] = sys_linkat,
+ 	[472] = sys_unlinkat,
+-	[473] = sys_readlinkat,
+-	[474] = sys_symlinkat,
++	[473] = guarded_readlinkat,
++	[474] = guarded_symlinkat,
  	[475] = sys_mkdirat,
- 	[476] = sys_getattrlistat,
+-	[476] = sys_getattrlistat,
++	[476] = guarded_getattrlistat,
  	[478] = sys_bsdthread_ctl,
 +	[482] = sys_thread_selfusage,
  	[483] = sys_csrctl,
@@ -2789,10 +3113,25 @@ index 4319355..12a5e20 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..6cc204e 100644
+index 8fabdda..b7f785a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-@@ -22,6 +22,7 @@ static sysctl_handler(handle_route);
+@@ -11,17 +11,22 @@
+ #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
++#include <darling/emulation/common/runtime_identity.h>
++#include <darling/emulation/common/simple.h>
++#include <stdbool.h>
+ 
+ extern void* memset(void* destination, int value, size_t length);
+ extern void* memcpy(void* destination, const void* source, size_t n);
+ extern size_t strnlen(const char* string, size_t max_length);
+ extern char* strncpy(char* destination, const char* source, size_t length);
+ extern size_t strlcpy(char* destination, const char* source, size_t size);
++extern int strncmp(const char* a, const char* b, size_t n);
+ 
+ static sysctl_handler(handle_route);
  static int do_iflist(void* old, unsigned long* oldlen);
  
  #define LINUX_SIOCGIFCONF 0x8912
@@ -2800,10 +3139,167 @@ index 8fabdda..6cc204e 100644
  #define LINUX_SIOCGIFHWADDR 0x8927
  #define LINUX_SIOCGIFBRDADDR 0x8919
  #define LINUX_SIOCGIFNETMASK 0x891b
-@@ -144,6 +145,16 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -63,7 +68,8 @@ struct linux_ifreq {
+ };
  
- 			memcpy(dl->sdl_data, curr->lifr_name, name_len);
+ // arbitrary number; only exists to avoid blowing up the stack
+-#define IFC_MAX_INTERFACES 5
++// (darling-lol: was 5, which silently dropped interfaces on hosts with bridges or VPNs)
++#define IFC_MAX_INTERFACES 32
  
+ struct linux_ifconf {
+ 	int lifc_len;
+@@ -88,6 +94,106 @@ const struct known_sysctl sysctls_net[] = {
+ 	{ .oid = -1 },
+ };
+ 
++/*
++ * darling-lol: Mac interface names. A Mac has lo0, en0 (Wi-Fi on a MacBook), further
++ * enN and utunN tunnels; it has no wlo1, virbr0, docker0 or tailscale0. With
++ * host.hide=1 (per-prefix runtime identity) the interface list uses Mac names and
++ * leaves out host-only virtual interfaces; darling_ifname_to_linux() maps a Mac name
++ * back for the ioctls that take one. The mapping is a pure function of the host's
++ * SIOCGIFCONF order, so every process derives the same names.
++ */
++enum { IFKIND_HIDDEN, IFKIND_LOOPBACK, IFKIND_WIRELESS, IFKIND_WIRED, IFKIND_TUNNEL };
++
++static bool name_starts(const char* name, const char* prefix) {
++	while (*prefix && *name == *prefix) {
++		name++;
++		prefix++;
++	}
++	return *prefix == '\0';
++}
++
++static int interface_kind(const char* name) {
++	static const char* const hidden[] = { "virbr", "br-", "docker", "veth", "vnet", "lxc", "lxd",
++		"cni", "flannel", "kube", "podman", "vmnet", "vboxnet", "zt", "bond", "dummy", "macvtap" };
++	static const char* const tunnels[] = { "tailscale", "tun", "tap", "wg", "utun", "ppp",
++		"proton", "nordlynx", "ipsec", "mullvad", "gpd", "cscotun" };
++	if (name_starts(name, "lo"))
++		return IFKIND_LOOPBACK;
++	for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++)
++		if (name_starts(name, hidden[i]))
++			return IFKIND_HIDDEN;
++	for (unsigned i = 0; i < sizeof(tunnels) / sizeof(tunnels[0]); i++)
++		if (name_starts(name, tunnels[i]))
++			return IFKIND_TUNNEL;
++	if (name_starts(name, "wl") || name_starts(name, "ath") || name_starts(name, "ra"))
++		return IFKIND_WIRELESS;
++	return IFKIND_WIRED;
++}
++
++static bool mac_interface_names(void) {
++	static int state = -1;
++	if (state < 0) {
++		char data[DARLING_RUNTIME_IDENTITY_MAX];
++		state = __darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "host.hide");
++	}
++	return state;
++}
++
++/* Mac names for the count interfaces in names (LINUX_IFNAMSIZ each); "" = hidden.
++ * Wireless first takes en0, then wired; tunnels are utun0... in order. */
++static void assign_mac_names(const char (*names)[LINUX_IFNAMSIZ], int count, char (*mac)[LINUX_IFNAMSIZ]) {
++	int en = 0, utun = 0;
++	for (int i = 0; i < count; i++)
++		mac[i][0] = '\0';
++	for (int pass = 0; pass < 2; pass++) {
++		for (int i = 0; i < count; i++) {
++			int kind = interface_kind(names[i]);
++			if ((pass == 0 && kind == IFKIND_WIRELESS) || (pass == 1 && kind == IFKIND_WIRED))
++				__simple_sprintf(mac[i], "en%d", en++);
++		}
++	}
++	for (int i = 0; i < count; i++) {
++		int kind = interface_kind(names[i]);
++		if (kind == IFKIND_LOOPBACK)
++			strlcpy(mac[i], "lo0", LINUX_IFNAMSIZ);
++		else if (kind == IFKIND_TUNNEL)
++			__simple_sprintf(mac[i], "utun%d", utun++);
++	}
++}
++
++static int host_interfaces(int sock, struct linux_ifconf* lifc) {
++	return __real_ioctl(sock, LINUX_SIOCGIFCONF, lifc);
++}
++
++int darling_ifname_to_linux(const char* mac_name, char* linux_name) {
++	char buf[IFC_MAX_INTERFACES * sizeof(struct linux_ifreq)];
++	char names[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++	char mac[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++	struct linux_ifconf lifc = { .lifc_len = sizeof(buf), .lifc_buf = buf };
++	int sock, count, found = 0;
++
++	strlcpy(linux_name, mac_name, LINUX_IFNAMSIZ);
++	if (!mac_interface_names())
++		return 0;
++	if ((sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
++		return 0;
++	if (host_interfaces(sock, &lifc) >= 0) {
++		count = lifc.lifc_len / sizeof(struct linux_ifreq);
++		for (int i = 0; i < count; i++)
++			strlcpy(names[i], lifc.lifc_req[i].lifr_name, LINUX_IFNAMSIZ);
++		assign_mac_names((const char (*)[LINUX_IFNAMSIZ]) names, count, mac);
++		for (int i = 0; i < count && !found; i++) {
++			if (mac[i][0] && strnlen(mac_name, LINUX_IFNAMSIZ) == strnlen(mac[i], LINUX_IFNAMSIZ) &&
++					strncmp(mac_name, mac[i], LINUX_IFNAMSIZ) == 0) {
++				strlcpy(linux_name, names[i], LINUX_IFNAMSIZ);
++				found = 1;
++			}
++		}
++	}
++	close_internal(sock);
++	return found;
++}
++
+ static unsigned long round_up_sizeof_u32(unsigned long number) {
+ 	return (number + (sizeof(uint32_t) - 1)) & ~(sizeof(uint32_t) - 1);
+ }
+@@ -107,19 +213,33 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+ 	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+ 		goto out;
+ 
+-	if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFCONF, &lifc)) < 0)
++	if ((status = host_interfaces(tmp_sock, &lifc)) < 0)
+ 		goto out;
+ 
++	char mac[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++	bool rename = mac_interface_names();
++	if (rename) {
++		char names[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++		int count = lifc.lifc_len / sizeof(struct linux_ifreq);
++		for (int k = 0; k < count; k++)
++			strlcpy(names[k], lifc.lifc_req[k].lifr_name, LINUX_IFNAMSIZ);
++		assign_mac_names((const char (*)[LINUX_IFNAMSIZ]) names, count, mac);
++	}
++	size_t shown = 0;
++
+ 	for (int i = 0; i < lifc.lifc_len; i += sizeof(struct linux_ifreq)) {
+ 		struct linux_ifreq* curr = &lifc.lifc_req[i / sizeof(struct linux_ifreq)];
+-		size_t name_len = strnlen(curr->lifr_name, sizeof(curr->lifr_name));
++		const char* shown_name = rename ? mac[i / sizeof(struct linux_ifreq)] : curr->lifr_name;
++		if (shown_name[0] == '\0')
++			continue; // host-only virtual interface
++		size_t name_len = strnlen(shown_name, LINUX_IFNAMSIZ);
+ 		size_t additional_sockaddr_len = name_len + MAC_LENGTH;
+ 		additional_sockaddr_len = (additional_sockaddr_len <= sizeof(((struct sockaddr_dl*)NULL)->sdl_data)) ? 0 : (additional_sockaddr_len - sizeof(((struct sockaddr_dl*)NULL)->sdl_data));
+ 		size_t ifm_length = sizeof(struct if_msghdr) + round_up_sizeof_u32(sizeof(struct sockaddr_dl) + additional_sockaddr_len);
+ 		size_t ifam_length = sizeof(struct ifa_msghdr) + round_up_sizeof_u32(sizeof(struct sockaddr)) * 3;
+ 		// technically not correct; SIOCGIFCONF could return the same interfaces in a different order on each call
+ 		// but this is enough for our purposes
+-		size_t iface_idx = (i / sizeof(struct linux_ifreq)) + 1;
++		size_t iface_idx = ++shown;
+ 
+ 		if (old && *oldlen >= total_len + ifm_length) {
+ 			struct if_msghdr* ifm = (void*)old_ptr;
+@@ -142,7 +262,17 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+ 			dl->sdl_alen = MAC_LENGTH;
+ 			dl->sdl_slen = 0; // ???
+ 
+-			memcpy(dl->sdl_data, curr->lifr_name, name_len);
++			memcpy(dl->sdl_data, shown_name, name_len);
++
 +			/* Interface-list consumers (including Chromium) discard adapters
 +			 * without IFF_UP. Populate actual flags instead of leaving zero.
 +			 * The low ten flags share values; Linux multicast differs. */
@@ -2813,10 +3309,9 @@ index 8fabdda..6cc204e 100644
 +			unsigned short linux_flags = (unsigned short)tmp.lifr_flags;
 +			ifm->ifm_flags = linux_flags & 0x03ff;
 +			if (linux_flags & 0x1000) ifm->ifm_flags |= IFF_MULTICAST;
-+
+ 
  			// grab the MAC
  			memcpy(tmp.lifr_name, curr->lifr_name, sizeof(curr->lifr_name));
- 			if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFHWADDR, &tmp)) < 0)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
 index 5a49882..5dc5fa7 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
@@ -6660,9 +7155,10 @@ index 0000000..eb90f43
 +}
 +#endif
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchroot_userspace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchroot_userspace.c
+index 2b72ad9..16e72f8 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchroot_userspace.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchroot_userspace.c
-@@ -421,12 +421,14 @@
+@@ -421,12 +421,14 @@ done_getdents:
  							ctxt->follow = true;
  							ctxt->symlink_depth++;
  
@@ -6679,6 +7175,60 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root = prefix_path;
  								ctxt->current_root_len = prefix_path_len;
  							}
+@@ -523,6 +525,53 @@ int vchroot_fdpath(struct vchroot_fdpath_args* args)
+ 	return 0;
+ }
+ 
++#ifndef TEST
++/* darling-lol: the prefix's host path (the guest root) for the guarded-syscall checks. */
++const char* __darling_vchroot_prefix(int* length)
++{
++	if (prefix_path_len == -1)
++		init_vchroot_path();
++	*length = prefix_path_len;
++	return prefix_path;
++}
++
++/* darling-lol: <prefix>/private/etc/darling-runtime-identity.conf through raw Linux
++ * system calls, usable before and below the BSD syscall layer (dyld, signals). */
++bool __darling_identity_load(char* buffer, int size)
++{
++	static const char relative[] = "/private/etc/darling-runtime-identity.conf";
++	char path[4096 + sizeof(relative)];
++	int fd, total = 0;
++
++	if (size <= 1)
++		return false;
++	if (prefix_path_len == -1)
++		init_vchroot_path();
++	if (prefix_path_len + sizeof(relative) > sizeof(path))
++		return false;
++	memcpy(path, prefix_path, prefix_path_len);
++	memcpy(path + prefix_path_len, relative, sizeof(relative));
++
++#if defined(__NR_open)
++	fd = LINUX_SYSCALL(__NR_open, path, LINUX_O_RDONLY);
++#else
++	fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, path, LINUX_O_RDONLY);
++#endif
++	if (fd < 0)
++		return false;
++	while (total < size - 1)
++	{
++		int rd = LINUX_SYSCALL(__NR_read, fd, buffer + total, size - 1 - total);
++		if (rd <= 0)
++			break;
++		total += rd;
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++	buffer[total] = '\0';
++	return total > 0;
++}
++#endif
++
+ int vchroot_unexpand(struct vchroot_unexpand_args* args)
+ {
+ 	if (memcmp(args->path, prefix_path, prefix_path_len) == 0)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 index f1ce3d3..791899c 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
@@ -8084,10 +8634,10 @@ index 7fd6d41..cbcef44 100644
  	if (linux_flags == LINUX_AT_INVALID)
 
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
-index f890ab2..8969577 100644
+index f890ab2..1c594cd 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
-@@ -2,12 +2,29 @@
+@@ -2,12 +2,30 @@
  
  #include <sys/errno.h>
  #include <sys/socket.h>
@@ -8103,6 +8653,7 @@ index f890ab2..8969577 100644
 +extern int strcmp(const char* a, const char* b);
 +extern int strncmp(const char* a, const char* b, size_t n);
 +extern char* strncpy(char* destination, const char* source, size_t length);
++extern int darling_ifname_to_linux(const char* mac_name, char* linux_name);
 +
 +#define LINUX_SIOCGIFFLAGS 0x8913
 +#define LINUX_IFNAMSIZ 16
@@ -8118,7 +8669,7 @@ index f890ab2..8969577 100644
  int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
  {
  	switch (cmd)
-@@ -19,6 +36,57 @@ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
+@@ -19,6 +37,58 @@ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
  		case SIOCAIFADDR_IN6: // set IPv6 address
  			*retval = -ENOTSUP;
  			return IOCTL_HANDLED;
@@ -8137,8 +8688,9 @@ index f890ab2..8969577 100644
 +				return IOCTL_HANDLED;
 +			}
 +
++			// Mac interface names (en0, utun0) map back to the host's (sysctl_net.c)
 +			ifr.lifr_name[LINUX_IFNAMSIZ - 1] = '\0';
-+			strncpy(ifr.lifr_name, ifmr->ifm_name, LINUX_IFNAMSIZ - 1);
++			darling_ifname_to_linux(ifmr->ifm_name, ifr.lifr_name);
 +			status = __real_ioctl(fd, LINUX_SIOCGIFFLAGS, &ifr);
 +			if (status < 0)
 +			{
@@ -8152,7 +8704,7 @@ index f890ab2..8969577 100644
 +				return IOCTL_HANDLED;
 +			}
 +
-+			if (strncmp(ifmr->ifm_name, "wl", 2) == 0)
++			if (strncmp(ifr.lifr_name, "wl", 2) == 0)
 +				ifmr->ifm_current = IFM_IEEE80211 | IFM_AUTO;
 +			else
 +				ifmr->ifm_current = IFM_ETHER | IFM_AUTO;
@@ -8478,10 +9030,10 @@ index 8ae6ae0..5baf453 100644
  		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode, dev);
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h b/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h
 new file mode 100644
-index 0000000..8182e72
+index 0000000..6f46ba3
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,129 @@
 +#ifndef DARLING_COMMON_RUNTIME_IDENTITY_H
 +#define DARLING_COMMON_RUNTIME_IDENTITY_H
 +
@@ -8500,13 +9052,13 @@ index 0000000..8182e72
 +
 +bool read_string(const char* path, char* dst, int maxlen);
 +
-+static inline bool darling_runtime_identity_value(const char* key, char* value, size_t capacity)
++/* Look key up in an identity file's contents ("key=value" lines). */
++static inline bool darling_identity_lookup(const char* data, const char* key, char* value, size_t capacity)
 +{
-+	char data[DARLING_RUNTIME_IDENTITY_MAX];
 +	const char* line;
 +	size_t key_length = 0;
 +
-+	if (capacity == 0 || !read_string(DARLING_RUNTIME_IDENTITY_PATH, data, sizeof(data)))
++	if (capacity == 0)
 +		return false;
 +	while (key[key_length])
 +		key_length++;
@@ -8546,6 +9098,29 @@ index 0000000..8182e72
 +			line++;
 +	}
 +	return false;
++}
++
++static inline bool darling_runtime_identity_value(const char* key, char* value, size_t capacity)
++{
++	char data[DARLING_RUNTIME_IDENTITY_MAX];
++
++	if (capacity == 0 || !read_string(DARLING_RUNTIME_IDENTITY_PATH, data, sizeof(data)))
++		return false;
++	return darling_identity_lookup(data, key, value, capacity);
++}
++
++/*
++ * Reads the identity file with raw Linux system calls below the prefix root, without
++ * the BSD syscall layer, so dyld, the signal setup and the guarded syscalls can use it
++ * at any point. Implemented in vchroot_userspace.c. Returns false when it is missing.
++ */
++bool __darling_identity_load(char* buffer, int size);
++
++/* True when key is "1" in the identity file read by __darling_identity_load. */
++static inline bool darling_identity_flag(const char* data, const char* key)
++{
++	char value[4];
++	return darling_identity_lookup(data, key, value, sizeof(value)) && value[0] == '1' && value[1] == '\0';
 +}
 +
 +/*
@@ -8588,3 +9163,896 @@ index 0000000..8182e72
 +}
 +
 +#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/host_env.h b/darling/src/libsystem_kernel/emulation/include/common/host_env.h
+new file mode 100644
+index 0000000..c06a22f
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/host_env.h
+@@ -0,0 +1,56 @@
++#ifndef DARLING_COMMON_HOST_ENV_H
++#define DARLING_COMMON_HOST_ENV_H
++
++#include <stdbool.h>
++#include <stddef.h>
++
++/*
++ * darling-lol: environment variables that exist only for the Linux side of a guest
++ * process: the host libraries Darling loads into it (X11, Mesa/Vulkan/NVIDIA, audio,
++ * D-Bus, glibc/fontconfig), the Darling loader, and Darling/launcher switches. With
++ * host.hide=1 mldr leaves them out of the Mach-O environment (environ, NSProcessInfo),
++ * libc getenv still answers them through __darling_host_getenv, and execve passes
++ * them on to children so their host libraries keep working.
++ *
++ * mldr (src/startup/mldr/stack.c) carries a copy of this list; keep them identical.
++ */
++static inline bool darling_host_only_env(const char* entry, size_t name_length)
++{
++	static const char* const prefixes[] = {
++		"DARLING_", "RCLOL_", "__mldr_", "MESA_", "mesa_", "__GL_", "__GLX_", "__NV_", "__VK_",
++		"VK_", "__EGL_", "EGL_", "LIBGL_", "DRI_", "PULSE_", "PIPEWIRE_", "ALSA_", "XCURSOR_",
++		"XDG_", "DBUS_", "LD_", "FONTCONFIG_", "RADV_", "ANV_", "NV_", "GBM_", "WAYLAND_",
++	};
++	static const char* const names[] = {
++		"DISPLAY", "XAUTHORITY", "XMODIFIERS", "LOCALE_ARCHIVE", "TZDIR",
++	};
++
++	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
++	{
++		size_t j = 0;
++		while (prefixes[i][j] && j < name_length && entry[j] == prefixes[i][j])
++			j++;
++		if (!prefixes[i][j])
++			return true;
++	}
++	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
++	{
++		size_t j = 0;
++		while (names[i][j] && j < name_length && entry[j] == names[i][j])
++			j++;
++		if (!names[i][j] && j == name_length)
++			return true;
++	}
++	return false;
++}
++
++/* Length of the name part of a NAME=value entry. */
++static inline size_t darling_env_name_length(const char* entry)
++{
++	size_t n = 0;
++	while (entry[n] && entry[n] != '=')
++		n++;
++	return n;
++}
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h
+new file mode 100644
+index 0000000..6cdc385
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h
+@@ -0,0 +1,66 @@
++#ifndef DARLING_GUEST_VIEW_H
++#define DARLING_GUEST_VIEW_H
++
++#include <stdbool.h>
++
++struct stat;
++struct stat64;
++struct xnu_attrlist;
++struct bsd_statfs;
++struct bsd_statfs64;
++struct _posix_spawn_args_desc;
++
++/*
++ * darling-lol: what an application sees of the machine around the prefix.
++ *
++ * With host.hide=1 in the per-prefix runtime identity, applications (processes whose
++ * executable lives under /Applications or /Users) see a Mac file system: paths that
++ * resolve into the host root (/Volumes/SystemRoot/...) or the prefix's Linux /proc
++ * fail with ENOENT, except the few host files Darling itself links into the guest
++ * (/dev, time zone, resolver, nsswitch, machine-id) and the xdg-open/proc self-memory
++ * paths Darling's frameworks use. Directory listings omit /proc and
++ * /Volumes/SystemRoot, and the mount table shows one APFS volume plus devfs.
++ *
++ * These wrappers replace the BSD syscall table entries, so only system calls made by
++ * guest code are checked; libsystem_kernel's own sys_* calls (proc_info, sysctl, ...)
++ * keep using the host paths they need.
++ */
++bool darling_guest_view_active(void);
++bool darling_guest_path_hidden(int dfd, const char* path, bool follow);
++
++long guarded_open(const char* path, int flags, unsigned int mode);
++long guarded_open_nocancel(const char* path, int flags, unsigned int mode);
++long guarded_openat(int fd, const char* path, int flags, unsigned int mode);
++long guarded_openat_nocancel(int fd, const char* path, int flags, unsigned int mode);
++long guarded_stat(const char* path, struct stat* st);
++long guarded_lstat(const char* path, struct stat* st);
++long guarded_stat64(const char* path, struct stat64* st);
++long guarded_lstat64(const char* path, struct stat64* st);
++long guarded_stat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size);
++long guarded_lstat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size);
++long guarded_fstatat(int fd, const char* path, struct stat* st, int flag);
++long guarded_fstatat64(int fd, const char* path, struct stat64* st, int flag);
++long guarded_access(const char* path, int amode);
++long guarded_faccessat(int fd, const char* path, int amode, int flag);
++long guarded_readlink(const char* path, char* buf, int count);
++long guarded_readlinkat(int fd, const char* path, char* buf, int count);
++long guarded_chdir(const char* path);
++long guarded_getattrlist(const char* path, struct xnu_attrlist* alist, void* buffer, __SIZE_TYPE__ size, unsigned long options);
++long guarded_getattrlistat(int fd, const char* path, struct xnu_attrlist* alist, void* buffer, __SIZE_TYPE__ size, unsigned long options);
++long guarded_pathconf(const char* path, int name);
++long guarded_getxattr(const char* path, const char* name, char* value, unsigned long size, unsigned int pos, int options);
++long guarded_listxattr(const char* path, char* namebuf, unsigned long size, int options);
++long guarded_execve(const char* path, const char** argvp, const char** envp);
++long guarded_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_desc* desc, char** argvp, char** envp);
++long guarded_symlink(const char* target, const char* link);
++long guarded_symlinkat(const char* target, int fd, const char* link);
++long guarded_statfs(const char* path, struct bsd_statfs* buf);
++long guarded_statfs64(const char* path, struct bsd_statfs64* buf);
++long guarded_fstatfs(int fd, struct bsd_statfs* buf);
++long guarded_fstatfs64(int fd, struct bsd_statfs64* buf);
++long guarded_getfsstat(struct bsd_statfs* buf, int bufsize, int flags);
++long guarded_getfsstat64(struct bsd_statfs64* buf, int bufsize, int flags);
++long guarded_getdirentries(int fd, char* buf, unsigned int len, long* basep);
++long guarded_getdirentries64(int fd, char* buf, unsigned int len, long* basep);
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
+new file mode 100644
+index 0000000..56b5b58
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
+@@ -0,0 +1,578 @@
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
++
++#include <stddef.h>
++#include <stdint.h>
++#include <sys/errno.h>
++
++#include <darlingserver/rpc.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/runtime_identity.h>
++#include <darling/emulation/conversion/common_at.h>
++#include <darling/emulation/conversion/dirent/getdirentries.h>
++#include <darling/emulation/conversion/stat/common.h>
++#include <darling/emulation/linux_premigration/vchroot_expand.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/conf/pathconf.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/dirent/getdirentries.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/openat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/process/execve.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/process/posix_spawn.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/fstatat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/fstatfs.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/getfsstat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/lstat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/lstat64_extended.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/stat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/stat64_extended.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/statfs.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/access.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/chdir.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/faccessat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/readlink.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/readlinkat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/symlink.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/symlinkat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/xattr/getattrlist.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/xattr/getattrlistat.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/xattr/getxattr.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/xattr/listxattr.h>
++
++#include <string.h>
++
++const char* __darling_vchroot_prefix(int* length);
++
++#define BSD_AT_SYMLINK_NOFOLLOW 0x20
++
++/* Host locations reachable from the guest that a Mac also has an equivalent of:
++ * the targets of Darling's own guest symlinks (/dev, time zone, resolver, nsswitch,
++ * machine-id), /dev/fd -> /proc/self/fd, CoreVideo's /proc/self/mem writer, and the
++ * host URL opener LaunchServices runs. */
++static const char* const host_allowed[] = {
++	"/dev", "/etc/localtime", "/etc/machine-id", "/etc/nsswitch.conf", "/etc/resolv.conf",
++	"/usr/share/zoneinfo", "/run/systemd/resolve", "/run/NetworkManager", "/run/resolvconf",
++	"/proc/self/fd", "/proc/self/mem", "/usr/bin/xdg-open",
++};
++
++static char lower(char c)
++{
++	return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
++}
++
++static bool icontains(const char* haystack, const char* needle)
++{
++	for (; *haystack; haystack++)
++	{
++		size_t i = 0;
++		while (needle[i] && haystack[i] && lower(haystack[i]) == needle[i])
++			i++;
++		if (!needle[i])
++			return true;
++	}
++	return false;
++}
++
++static bool istarts(const char* text, const char* prefix)
++{
++	size_t i = 0;
++	while (prefix[i] && text[i] && lower(text[i]) == prefix[i])
++		i++;
++	return !prefix[i];
++}
++
++/* text is prefix itself or below it */
++static bool path_under(const char* text, const char* prefix, size_t length)
++{
++	return strncmp(text, prefix, length) == 0 && (text[length] == '\0' || text[length] == '/');
++}
++
++static bool has_dotdot(const char* path)
++{
++	const char* p = path;
++	while (*p)
++	{
++		if (p[0] == '.' && p[1] == '.' && (p == path || p[-1] == '/') && (p[2] == '/' || p[2] == '\0'))
++			return true;
++		p++;
++	}
++	return false;
++}
++
++bool darling_guest_view_active(void)
++{
++	static int state = -1;
++	char data[DARLING_RUNTIME_IDENTITY_MAX];
++	struct vchroot_unexpand_args exe;
++	uint64_t length;
++
++	if (state >= 0)
++		return state;
++	if (!__darling_identity_load(data, sizeof(data)) || !darling_identity_flag(data, "host.hide"))
++	{
++		state = 0;
++		return false;
++	}
++	/* Applications only: Darling's daemons and tools (iokitd, system_profiler, shells)
++	 * read the host on the guest's behalf. Undecided until darlingserver knows our
++	 * executable, so early dyld-time lookups are never hidden. */
++	if (dserver_rpc_get_executable_path(sys_getpid(), exe.path, sizeof(exe.path), &length) != 0)
++		return false;
++	if (vchroot_unexpand(&exe) != 0)
++		return false;
++	state = strncmp(exe.path, "/Applications/", 14) == 0 || strncmp(exe.path, "/Users/", 7) == 0;
++	return state;
++}
++
++bool darling_guest_path_hidden(int dfd, const char* path, bool follow)
++{
++	struct vchroot_expand_args args;
++	int prefix_length;
++	const char* prefix;
++
++	if (path == NULL || !darling_guest_view_active())
++		return false;
++	/* Lexically ordinary paths cannot leave the prefix: the only guest links into the
++	 * host are Darling's own, whose targets are allowed below. */
++	if (!has_dotdot(path) && !icontains(path, "proc") && !icontains(path, "systemroot"))
++		return false;
++	if (strlen(path) >= sizeof(args.path))
++		return false;
++
++	strcpy(args.path, path);
++	args.flags = follow ? VCHROOT_FOLLOW : 0;
++	args.dfd = dfd;
++	if (vchroot_expand(&args) != 0)
++		return false; /* the real call reports its own error */
++
++	prefix = __darling_vchroot_prefix(&prefix_length);
++	if (path_under(args.path, prefix, prefix_length))
++	{
++		const char* relative = args.path + prefix_length;
++		return path_under(relative, "/proc", 5);
++	}
++	for (size_t i = 0; i < sizeof(host_allowed) / sizeof(host_allowed[0]); i++)
++	{
++		if (path_under(args.path, host_allowed[i], strlen(host_allowed[i])))
++			return false;
++	}
++	return true;
++}
++
++#define AT_CWD_LINUX (-100)
++#define HIDE(dfd, path, follow) do { if (darling_guest_path_hidden((dfd), (path), (follow))) return -ENOENT; } while (0)
++
++long guarded_open(const char* path, int flags, unsigned int mode)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_open(path, flags, mode);
++}
++
++long guarded_open_nocancel(const char* path, int flags, unsigned int mode)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_open_nocancel(path, flags, mode);
++}
++
++long guarded_openat(int fd, const char* path, int flags, unsigned int mode)
++{
++	HIDE(atfd(fd), path, true);
++	return sys_openat(fd, path, flags, mode);
++}
++
++long guarded_openat_nocancel(int fd, const char* path, int flags, unsigned int mode)
++{
++	HIDE(atfd(fd), path, true);
++	return sys_openat_nocancel(fd, path, flags, mode);
++}
++
++/* Darling's guest links into the host (/dev, /etc/resolv.conf, ...) must look like the
++ * Mac's: /dev is a directory there, not a link to /Volumes/SystemRoot/dev. */
++static bool link_into_host(int dfd, const char* path)
++{
++	static const char* const names[] = {
++		"dev", "localtime", "machine-id", "nsswitch.conf", "resolv.conf", "zoneinfo",
++	};
++	char target[64];
++	const char* base;
++	long length;
++	bool candidate = false;
++
++	if (path == NULL)
++		return false;
++	/* Only Darling's own links point into the host; skip the readlink otherwise. */
++	base = path + strlen(path);
++	while (base > path && base[-1] == '/')
++		base--;
++	{
++		const char* end = base;
++		while (base > path && base[-1] != '/')
++			base--;
++		for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
++		{
++			size_t n = strlen(names[i]);
++			if ((size_t)(end - base) == n && strncmp(base, names[i], n) == 0)
++				candidate = true;
++		}
++	}
++	if (!candidate || !darling_guest_view_active())
++		return false;
++	length = sys_readlinkat(dfd, path, target, sizeof(target) - 1);
++	if (length <= 0)
++		return false;
++	target[length] = '\0';
++	return istarts(target, "/volumes/systemroot");
++}
++
++#define BSD_AT_FDCWD (-2)
++
++long guarded_stat(const char* path, struct stat* st)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_stat(path, st);
++}
++
++long guarded_lstat(const char* path, struct stat* st)
++{
++	HIDE(AT_CWD_LINUX, path, false);
++	if (link_into_host(BSD_AT_FDCWD, path))
++		return sys_stat(path, st);
++	return sys_lstat(path, st);
++}
++
++long guarded_stat64(const char* path, struct stat64* st)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_stat64(path, st);
++}
++
++long guarded_lstat64(const char* path, struct stat64* st)
++{
++	HIDE(AT_CWD_LINUX, path, false);
++	if (link_into_host(BSD_AT_FDCWD, path))
++		return sys_stat64(path, st);
++	return sys_lstat64(path, st);
++}
++
++long guarded_stat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_stat64_extended(path, st, xsec, xsec_size);
++}
++
++long guarded_lstat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size)
++{
++	HIDE(AT_CWD_LINUX, path, false);
++	if (link_into_host(BSD_AT_FDCWD, path))
++		return sys_stat64_extended(path, st, xsec, xsec_size);
++	return sys_lstat64_extended(path, st, xsec, xsec_size);
++}
++
++long guarded_fstatat(int fd, const char* path, struct stat* st, int flag)
++{
++	bool follow = !(flag & BSD_AT_SYMLINK_NOFOLLOW);
++	HIDE(atfd(fd), path, follow);
++	if (!follow && link_into_host(fd, path))
++		flag &= ~BSD_AT_SYMLINK_NOFOLLOW;
++	return sys_fstatat(fd, path, st, flag);
++}
++
++long guarded_fstatat64(int fd, const char* path, struct stat64* st, int flag)
++{
++	bool follow = !(flag & BSD_AT_SYMLINK_NOFOLLOW);
++	HIDE(atfd(fd), path, follow);
++	if (!follow && link_into_host(fd, path))
++		flag &= ~BSD_AT_SYMLINK_NOFOLLOW;
++	return sys_fstatat64(fd, path, st, flag);
++}
++
++long guarded_access(const char* path, int amode)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_access(path, amode);
++}
++
++long guarded_faccessat(int fd, const char* path, int amode, int flag)
++{
++	HIDE(atfd(fd), path, !(flag & BSD_AT_SYMLINK_NOFOLLOW));
++	return sys_faccessat(fd, path, amode, flag);
++}
++
++long guarded_readlink(const char* path, char* buf, int count)
++{
++	HIDE(AT_CWD_LINUX, path, false);
++	if (link_into_host(BSD_AT_FDCWD, path))
++		return -EINVAL; /* a directory or file on a Mac, not a link */
++	return sys_readlink(path, buf, count);
++}
++
++long guarded_readlinkat(int fd, const char* path, char* buf, int count)
++{
++	HIDE(atfd(fd), path, false);
++	if (link_into_host(fd, path))
++		return -EINVAL;
++	return sys_readlinkat(fd, path, buf, count);
++}
++
++long guarded_chdir(const char* path)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_chdir(path);
++}
++
++long guarded_getattrlist(const char* path, struct xnu_attrlist* alist, void* buffer, __SIZE_TYPE__ size, unsigned long options)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_getattrlist(path, alist, buffer, size, options);
++}
++
++long guarded_getattrlistat(int fd, const char* path, struct xnu_attrlist* alist, void* buffer, __SIZE_TYPE__ size, unsigned long options)
++{
++	HIDE(atfd(fd), path, true);
++	return sys_getattrlistat(fd, path, alist, buffer, size, options);
++}
++
++long guarded_pathconf(const char* path, int name)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_pathconf(path, name);
++}
++
++long guarded_getxattr(const char* path, const char* name, char* value, unsigned long size, unsigned int pos, int options)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_getxattr(path, name, value, size, pos, options);
++}
++
++long guarded_listxattr(const char* path, char* namebuf, unsigned long size, int options)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_listxattr(path, namebuf, size, options);
++}
++
++long guarded_execve(const char* path, const char** argvp, const char** envp)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_execve(path, argvp, envp);
++}
++
++long guarded_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_desc* desc, char** argvp, char** envp)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	return sys_posix_spawn(pid, path, desc, argvp, envp);
++}
++
++/* No new guest links into the host root or Linux /proc. */
++static bool host_link_target(const char* target)
++{
++	return target && darling_guest_view_active() &&
++		(icontains(target, "systemroot") || istarts(target, "/proc"));
++}
++
++long guarded_symlink(const char* target, const char* link)
++{
++	if (host_link_target(target))
++		return -EACCES;
++	return sys_symlink(target, link);
++}
++
++long guarded_symlinkat(const char* target, int fd, const char* link)
++{
++	if (host_link_target(target))
++		return -EACCES;
++	return sys_symlinkat(target, fd, link);
++}
++
++/* One APFS data volume and devfs, as on a Mac. */
++static void mac_fs_names(const char* mounted_on, char* type, char* from, char* on, size_t on_size)
++{
++	if (path_under(mounted_on, "/dev", 4))
++	{
++		strcpy(type, "devfs");
++		strcpy(from, "devfs");
++		strcpy(on, "/dev");
++		return;
++	}
++	strcpy(type, "apfs");
++	strcpy(from, "/dev/disk1s1");
++	if (mounted_on[0] != '/' || istarts(mounted_on, "/volumes/systemroot") || path_under(mounted_on, "/proc", 5))
++		strcpy(on, "/");
++	(void) on_size;
++}
++
++static void mac_statfs64(struct bsd_statfs64* s)
++{
++	char on[sizeof(s->f_mntonname)];
++	strcpy(on, s->f_mntonname);
++	memset(s->f_fstypename, 0, sizeof(s->f_fstypename));
++	memset(s->f_mntfromname, 0, sizeof(s->f_mntfromname));
++	mac_fs_names(on, s->f_fstypename, s->f_mntfromname, s->f_mntonname, sizeof(s->f_mntonname));
++}
++
++static void mac_statfs(struct bsd_statfs* s)
++{
++	char on[sizeof(s->f_mntonname)];
++	strcpy(on, s->f_mntonname);
++	memset(s->f_fstypename, 0, sizeof(s->f_fstypename));
++	memset(s->f_mntfromname, 0, sizeof(s->f_mntfromname));
++	mac_fs_names(on, s->f_fstypename, s->f_mntfromname, s->f_mntonname, sizeof(s->f_mntonname));
++}
++
++long guarded_statfs(const char* path, struct bsd_statfs* buf)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	long rv = sys_statfs(path, buf);
++	if (rv == 0 && darling_guest_view_active())
++		mac_statfs(buf);
++	return rv;
++}
++
++long guarded_statfs64(const char* path, struct bsd_statfs64* buf)
++{
++	HIDE(AT_CWD_LINUX, path, true);
++	long rv = sys_statfs64(path, buf);
++	if (rv == 0 && darling_guest_view_active())
++		mac_statfs64(buf);
++	return rv;
++}
++
++long guarded_fstatfs(int fd, struct bsd_statfs* buf)
++{
++	long rv = sys_fstatfs(fd, buf);
++	if (rv == 0 && darling_guest_view_active())
++		mac_statfs(buf);
++	return rv;
++}
++
++long guarded_fstatfs64(int fd, struct bsd_statfs64* buf)
++{
++	long rv = sys_fstatfs64(fd, buf);
++	if (rv == 0 && darling_guest_view_active())
++		mac_statfs64(buf);
++	return rv;
++}
++
++static bool mac_mount(const char* mounted_on)
++{
++	return strcmp(mounted_on, "/") == 0 || strcmp(mounted_on, "/dev") == 0;
++}
++
++long guarded_getfsstat64(struct bsd_statfs64* buf, int bufsize, int flags)
++{
++	long count = sys_getfsstat64(buf, bufsize, flags);
++	if (count <= 0 || buf == NULL || !darling_guest_view_active())
++		return count;
++	long kept = 0;
++	for (long i = 0; i < count; i++)
++	{
++		if (!mac_mount(buf[i].f_mntonname))
++			continue;
++		if (kept != i)
++			memcpy(&buf[kept], &buf[i], sizeof(buf[i]));
++		mac_statfs64(&buf[kept]);
++		kept++;
++	}
++	return kept;
++}
++
++long guarded_getfsstat(struct bsd_statfs* buf, int bufsize, int flags)
++{
++#ifdef __x86_64__
++	return guarded_getfsstat64((struct bsd_statfs64*) buf, bufsize, flags);
++#else
++	return sys_getfsstat(buf, bufsize, flags);
++#endif
++}
++
++/* Directory entries a Mac does not have: Linux /proc and Darling's prefix files at the
++ * root, and the host root volume below /Volumes. */
++static bool hidden_entry(const char* directory, const char* name)
++{
++	if (strcmp(directory, "/") == 0)
++		return strcmp(name, "proc") == 0 || strncmp(name, ".darlingserver", 14) == 0 ||
++			strncmp(name, ".init.pid", 9) == 0;
++	if (strcmp(directory, "/Volumes") == 0 || strcmp(directory, "/Volumes/") == 0)
++		return (istarts(name, "systemroot") && name[10] == '\0') || strcmp(name, "DarlingEmulatedDrive") == 0;
++	return false;
++}
++
++static bool may_hide(const char* name)
++{
++	return strcmp(name, "proc") == 0 || strncmp(name, ".darlingserver", 14) == 0 ||
++		strncmp(name, ".init.pid", 9) == 0 || istarts(name, "systemroot") ||
++		strcmp(name, "DarlingEmulatedDrive") == 0;
++}
++
++static bool directory_path(int fd, char* path, unsigned int size)
++{
++	struct vchroot_fdpath_args args = { .fd = fd, .path = path, .maxlen = size };
++	return vchroot_fdpath(&args) == 0;
++}
++
++long guarded_getdirentries64(int fd, char* buf, unsigned int len, long* basep)
++{
++	long total = sys_getdirentries64(fd, buf, len, basep);
++	char directory[4096];
++	bool resolved = false;
++
++	if (total <= 0 || !darling_guest_view_active())
++		return total;
++	for (long pos = 0; pos < total; )
++	{
++		struct bsd_dirent64* entry = (struct bsd_dirent64*)(buf + pos);
++		unsigned short reclen = entry->d_reclen;
++		if (reclen == 0)
++			break;
++		if (may_hide(entry->d_name))
++		{
++			if (!resolved)
++			{
++				if (!directory_path(fd, directory, sizeof(directory)))
++					return total;
++				resolved = true;
++			}
++			if (hidden_entry(directory, entry->d_name))
++			{
++				memmove(buf + pos, buf + pos + reclen, total - pos - reclen);
++				total -= reclen;
++				continue;
++			}
++		}
++		pos += reclen;
++	}
++	return total;
++}
++
++long guarded_getdirentries(int fd, char* buf, unsigned int len, long* basep)
++{
++	long total = sys_getdirentries(fd, buf, len, basep);
++	char directory[4096];
++	bool resolved = false;
++
++	if (total <= 0 || !darling_guest_view_active())
++		return total;
++	for (long pos = 0; pos < total; )
++	{
++		struct bsd_dirent* entry = (struct bsd_dirent*)(buf + pos);
++		unsigned short reclen = entry->d_reclen;
++		if (reclen == 0)
++			break;
++		if (may_hide(entry->d_name))
++		{
++			if (!resolved)
++			{
++				if (!directory_path(fd, directory, sizeof(directory)))
++					return total;
++				resolved = true;
++			}
++			if (hidden_entry(directory, entry->d_name))
++			{
++				memmove(buf + pos, buf + pos + reclen, total - pos - reclen);
++				total -= reclen;
++				continue;
++			}
++		}
++		pos += reclen;
++	}
++	return total;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/execve.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/execve.c
+index e1c4cc4..0122d8f 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/execve.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/execve.c
+@@ -33,6 +33,145 @@ extern bool isspace(char c);
+ 
+ extern void _xtrace_execve_inject(const char*** envp_ptr);
+ 
++#include <darling/emulation/common/host_env.h>
++#include <darling/emulation/common/runtime_identity.h>
++#include <darling/emulation/conversion/mman/duct_mman.h>
++
++/*
++ * darling-lol: the Linux side's environment. With host.hide=1, mldr leaves host-only
++ * variables (host_env.h) out of the Mach-O environment. The kernel's copy of this
++ * process's original environment (/proc/self/environ) still has them: libc getenv
++ * falls back to it, and execve passes them on so a child's host libraries (X11,
++ * Vulkan, audio) work.
++ */
++#define HOST_ENV_MAX (256 * 1024)
++
++/* 0 when the first n characters match, like strncmp (usable before libc exists). */
++static int host_env_strneq(const char* a, const char* b, size_t n)
++{
++	for (size_t i = 0; i < n; i++)
++	{
++		if (a[i] != b[i])
++			return 1;
++		if (!a[i])
++			return 0;
++	}
++	return 0;
++}
++
++static const char* host_env_block(long* size_out)
++{
++	static const char* block;
++	static long size;
++	char* buffer;
++	long total = 0;
++	int fd;
++
++	if (block)
++	{
++		*size_out = size;
++		return block;
++	}
++	buffer = (char*) LINUX_SYSCALL(__NR_mmap, NULL, HOST_ENV_MAX, LINUX_PROT_READ | LINUX_PROT_WRITE,
++			LINUX_MAP_PRIVATE | LINUX_MAP_ANONYMOUS, -1, 0);
++	if ((long) buffer < 0 && (long) buffer > -4096)
++		return NULL;
++	fd = LINUX_SYSCALL(__NR_openat, -100, "/proc/self/environ", 0 /* O_RDONLY */);
++	if (fd < 0)
++	{
++		LINUX_SYSCALL(__NR_munmap, buffer, HOST_ENV_MAX);
++		return NULL;
++	}
++	while (total < HOST_ENV_MAX - 1)
++	{
++		long rd = LINUX_SYSCALL(__NR_read, fd, buffer + total, HOST_ENV_MAX - 1 - total);
++		if (rd <= 0)
++			break;
++		total += rd;
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++	buffer[total] = '\0';
++
++	if (!__sync_bool_compare_and_swap(&block, NULL, buffer))
++		LINUX_SYSCALL(__NR_munmap, buffer, HOST_ENV_MAX);
++	else
++		size = total;
++	*size_out = size;
++	return block;
++}
++
++VISIBLE
++const char* __darling_host_getenv(const char* name)
++{
++	long size;
++	size_t name_length = 0;
++	const char* block;
++
++	if (name == NULL)
++		return NULL;
++	while (name[name_length])
++		name_length++;
++	if (!darling_host_only_env(name, name_length) || !(block = host_env_block(&size)))
++		return NULL;
++	for (long pos = 0; pos < size; )
++	{
++		const char* entry = block + pos;
++		size_t length = 0;
++		while (pos + (long) length < size && entry[length])
++			length++;
++		if (length > name_length && entry[name_length] == '=' &&
++				host_env_strneq(entry, name, name_length) == 0)
++			return entry + name_length + 1;
++		pos += length + 1;
++	}
++	return NULL;
++}
++
++/* envp plus the host-only entries it lacks (never the loader's own __mldr_*). */
++static const char** with_host_env(const char** envp, const char** storage, int capacity)
++{
++	long size;
++	const char* block;
++	int count = 0;
++
++	/* Unconditional: whether mldr hid them depends on the identity file, which the
++	 * vchroot helper that starts launchd cannot read yet. Only names envp lacks are
++	 * added, so with nothing hidden this changes nothing. */
++	if (!(block = host_env_block(&size)))
++		return envp;
++	while (envp[count])
++	{
++		if (count >= capacity - 1)
++			return envp;
++		storage[count] = envp[count];
++		count++;
++	}
++	int base = count;
++	for (long pos = 0; pos < size; )
++	{
++		const char* entry = block + pos;
++		size_t length = 0;
++		while (pos + (long) length < size && entry[length])
++			length++;
++		pos += length + 1;
++		size_t name_length = darling_env_name_length(entry);
++		if (name_length == 0 || name_length == length || !darling_host_only_env(entry, name_length) ||
++				host_env_strneq(entry, "__mldr_", 7) == 0)
++			continue;
++		bool present = false;
++		for (int i = 0; i < base && !present; i++)
++			present = host_env_strneq(storage[i], entry, name_length) == 0 && storage[i][name_length] == '=';
++		if (!present)
++		{
++			if (count >= capacity - 1)
++				break;
++			storage[count++] = entry;
++		}
++	}
++	storage[count] = NULL;
++	return storage;
++}
++
+ static inline bool istext(char c)
+ {
+ 	return c >= 0x20 && c < 0x7F;
+@@ -186,8 +325,11 @@ long sys_execve(const char* fname, const char** argvp, const char** envp)
+ 		struct linux_sockaddr_un* server_socket_address = dserver_rpc_hooks_get_server_address();
+ 		const char* server_socket_path = server_socket_address->sun_path;
+ 
+-		char mldr_lifetime_pipe_env[32] = { '\0' };
+-		__simple_snprintf(mldr_lifetime_pipe_env, sizeof(mldr_lifetime_pipe_env) - 1, "__mldr_lifetime_pipe=%d", __dserver_get_process_lifetime_pipe());
++		// alloca, not a block-scoped array: envp keeps pointing at it after this block
++		// (later allocas would otherwise reuse its stack slot before the execve)
++		char* mldr_lifetime_pipe_env = __builtin_alloca(32);
++		mldr_lifetime_pipe_env[0] = '\0';
++		__simple_snprintf(mldr_lifetime_pipe_env, 31, "__mldr_lifetime_pipe=%d", __dserver_get_process_lifetime_pipe());
+ 
+ 		// count original env vars
+ 		while (envp[len++]);
+@@ -241,6 +383,10 @@ long sys_execve(const char* fname, const char** argvp, const char** envp)
+ 	LINUX_SYSCALL(__NR_rt_sigprocmask, 0 /* LINUX_SIG_BLOCK */,
+ 			&set, NULL, sizeof(linux_sigset_t));
+ 
++	// darling-lol: children's host libraries need the host-only environment
++	const char** full_envp = (const char**) __builtin_alloca(sizeof(char*) * 2048);
++	envp = with_host_env(envp, full_envp, 2048);
++
+ 	// let xtrace inject itself into the execve, if necessary
+ 	_xtrace_execve_inject(&envp);
+ 

@@ -1,0 +1,32 @@
+diff --git a/stdlib/FreeBSD/getenv.c b/stdlib/FreeBSD/getenv.c
+index c012578..57ed12f 100644
+--- a/stdlib/FreeBSD/getenv.c
++++ b/stdlib/FreeBSD/getenv.c
+@@ -117,6 +117,17 @@ _getenvp(const char *name, char ***envp, void *state __unused)
+  * getenv --
+  *	Returns ptr to value associated with name, if any, else NULL.
+  */
++#ifndef VARIANT_DYLD
++/*
++ * darling-lol: with host.hide=1, Darling keeps the variables that only the Linux side
++ * of the process uses (DISPLAY, Vulkan/Mesa/audio settings, Darling switches) out of
++ * environ, so applications enumerating their environment see a Mac's. Darling's own
++ * frameworks still read them with getenv; libsystem_kernel answers from the process's
++ * original environment. Names an application set itself still win.
++ */
++extern const char* __darling_host_getenv(const char* name);
++#endif
++
+ char *
+ getenv(name)
+ 	const char *name;
+@@ -125,5 +136,9 @@ getenv(name)
+ 	__environ_lock();
+ 	char *result = __findenv_locked(name, &offset, *_NSGetEnviron());
+ 	__environ_unlock();
++#ifndef VARIANT_DYLD
++	if (result == NULL)
++		result = (char *) __darling_host_getenv(name);
++#endif
+ 	return result;
+ }
