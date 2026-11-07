@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 84161fd..5b23944 100644
+index 84161fd..50e659b 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -17,6 +17,8 @@ include_directories(
@@ -11,13 +11,14 @@ index 84161fd..5b23944 100644
  
  mig(iokitmig.defs)
  mig(powermanagement.defs)
-@@ -36,7 +38,13 @@ set(iokitd_sources
+@@ -36,7 +38,14 @@ set(iokitd_sources
  	src/IODisplayConnect.mm
  	src/IODisplayConnectX11.mm
  	src/PowerAssertions.mm
 +	src/PowerSources.mm
  	src/PowerAssertionsX11.mm
 +	src/IOPlatformExpertDevice.mm
++	src/IOGraphicsDevices.mm
 +	src/IOPMrootDomain.mm
 +	src/IOInterestNotification.mm
 +	src/LogindSleep.c
@@ -26,7 +27,7 @@ index 84161fd..5b23944 100644
  	src/IOSurface.mm
  	src/IOUserClient.mm
 diff --git a/src/IORegistryEntry.mm b/src/IORegistryEntry.mm
-index 50c10fe..7026e1c 100644
+index 50c10fe..b30b3d5 100644
 --- a/src/IORegistryEntry.mm
 +++ b/src/IORegistryEntry.mm
 @@ -1,11 +1,15 @@
@@ -45,7 +46,37 @@ index 50c10fe..7026e1c 100644
  #include "IOIterator.h"
  extern "C" {
  #include "iokitmigServer.h"
-@@ -29,6 +33,12 @@ IORegistryEntry::~IORegistryEntry()
+@@ -18,10 +22,28 @@ uint64_t IORegistryEntry::m_nextId = 0x100000000;
+ std::unordered_map<uint64_t, IORegistryEntry*> IORegistryEntry::m_entriesById;
+ std::shared_mutex IORegistryEntry::m_entriesByIdMutex;
+ 
++// Callers hold m_entriesByIdMutex. Fixed IDs (the GPU accelerators Metal names) are taken
++// at startup, so sequential allocation steps over them instead of colliding later.
++uint64_t IORegistryEntry::allocateId(uint64_t wanted)
++{
++	if (wanted && !m_entriesById.count(wanted))
++		return wanted;
++	while (m_entriesById.count(m_nextId))
++		m_nextId++;
++	return m_nextId++;
++}
++
+ IORegistryEntry::IORegistryEntry()
+ {
+ 	std::unique_lock l(m_entriesByIdMutex);
+-	m_id = m_nextId++;
++	m_id = allocateId(0);
++	m_entriesById.emplace(m_id, this);
++}
++
++IORegistryEntry::IORegistryEntry(uint64_t registryID)
++{
++	std::unique_lock l(m_entriesByIdMutex);
++	m_id = allocateId(registryID);
+ 	m_entriesById.emplace(m_id, this);
+ }
+ 
+@@ -29,6 +51,12 @@ IORegistryEntry::~IORegistryEntry()
  {
  	std::unique_lock l(m_entriesByIdMutex);
  	m_entriesById.erase(m_id);
@@ -58,7 +89,7 @@ index 50c10fe..7026e1c 100644
  }
  
  IORegistryEntry* IORegistryEntry::findById(uint64_t id)
-@@ -79,29 +89,42 @@ std::set<IORegistryEntry*> IORegistryEntry::getChildren(const char* plane)
+@@ -79,29 +107,42 @@ std::set<IORegistryEntry*> IORegistryEntry::getChildren(const char* plane)
  
  void IORegistryEntry::registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent)
  {
@@ -103,7 +134,7 @@ index 50c10fe..7026e1c 100644
  		std::set<IORegistryEntry*> parents = cur->getParents(plane);
  		if (parents.empty())
  		{
-@@ -113,18 +136,22 @@ std::string IORegistryEntry::getPath(const char* plane)
+@@ -113,18 +154,22 @@ std::string IORegistryEntry::getPath(const char* plane)
  
  		components.push(cur->getName(plane));
  		
@@ -127,7 +158,7 @@ index 50c10fe..7026e1c 100644
  	}
  
  	return path;
-@@ -166,11 +193,15 @@ kern_return_t is_io_registry_entry_get_path
+@@ -166,11 +211,15 @@ kern_return_t is_io_registry_entry_get_path
  	io_string_t path
  )
  {
@@ -143,7 +174,7 @@ index 50c10fe..7026e1c 100644
  	strlcpy(path, mypath.c_str(), sizeof(io_string_t));
  
  	return kIOReturnSuccess;
-@@ -386,55 +417,59 @@ kern_return_t is_io_registry_entry_get_location_in_plane
+@@ -386,55 +435,59 @@ kern_return_t is_io_registry_entry_get_location_in_plane
      return KERN_NOT_SUPPORTED;
  }
  
@@ -246,7 +277,7 @@ index 50c10fe..7026e1c 100644
  	return kIOReturnSuccess;
  }
  
-@@ -513,3 +548,189 @@ kern_return_t is_io_registry_entry_get_property_bin
+@@ -513,3 +566,189 @@ kern_return_t is_io_registry_entry_get_property_bin
      return kr;
  }
  
@@ -767,19 +798,20 @@ index aaed046..7a190c3 100644
 +	}
 +}
 diff --git a/src/main.mm b/src/main.mm
-index 37ce9b8..e23aea0 100644
+index 37ce9b8..f89d72c 100644
 --- a/src/main.mm
 +++ b/src/main.mm
-@@ -32,6 +32,8 @@
+@@ -32,6 +32,9 @@
  #include "IODisplayConnectX11.h"
  #include "PowerAssertions.h"
  #include "IOSurfaceRoot.h"
 +#include "IOPlatformExpertDevice.h"
++#include "IOGraphicsDevices.h"
 +#include "IOPMrootDomain.h"
  
  extern "C" {
  #include "iokitmigServer.h"
-@@ -127,6 +129,8 @@ int main(int argc, const char** argv)
+@@ -127,6 +130,8 @@ int main(int argc, const char** argv)
  	dispatch_resume(deathSource);
  	dispatch_resume(pwrMgmtPortSource);
  
@@ -788,11 +820,12 @@ index 37ce9b8..e23aea0 100644
  	os_log(OS_LOG_DEFAULT, "iokitd up and running.");
  
  	dispatch_main();
-@@ -146,5 +150,7 @@ static void discoverAllDevices()
+@@ -146,5 +151,8 @@ static void discoverAllDevices()
  	// Trick to make sure the root object gets instantiated first and gets the lowest ID
  	IORegistryEntry::root();
  	IODisplayConnectX11::discoverDevices(registry);
 +	IOPlatformExpertDevice::registerSelf(registry);
++	IOGraphicsDevices::discoverDevices(registry, IOPlatformExpertDevice::instance());
  	IOSurfaceRoot::registerSelf(registry);
 +	IOPMrootDomain::registerSelf(registry);
  }
@@ -1066,10 +1099,9 @@ index 91d11a1..5a00091 100644
 -}
 diff --git a/src/IOPlatformExpertDevice.h b/src/IOPlatformExpertDevice.h
 new file mode 100644
-index 0000000..38ad635
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +#ifndef IOKITD_IOPLATFORMEXPERTDEVICE_H
 +#define IOKITD_IOPLATFORMEXPERTDEVICE_H
 +
@@ -1087,16 +1119,16 @@ index 0000000..38ad635
 +	NSDictionary* getProperties() override;
 +	bool conformsTo(const char* className) override;
 +
++	static IOPlatformExpertDevice* instance();
 +	static void registerSelf(ServiceRegistry* targetServiceRegistry);
 +};
 +
 +#endif
 diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
 new file mode 100644
-index 0000000..71b9f4d
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,104 @@
 +#include "IOPlatformExpertDevice.h"
 +#include "PlatformIdentity.h"
 +#import <Foundation/NSString.h>
@@ -1188,9 +1220,15 @@ index 0000000..71b9f4d
 +	return IOService::conformsTo(className);
 +}
 +
-+void IOPlatformExpertDevice::registerSelf(ServiceRegistry* targetServiceRegistry)
++IOPlatformExpertDevice* IOPlatformExpertDevice::instance()
 +{
 +	static IOPlatformExpertDevice* device = new IOPlatformExpertDevice;
++	return device;
++}
++
++void IOPlatformExpertDevice::registerSelf(ServiceRegistry* targetServiceRegistry)
++{
++	IOPlatformExpertDevice* device = instance();
 +
 +	targetServiceRegistry->registerService(device);
 +	device->registerInPlane(kIOServicePlane, "Platform", IORegistryEntry::root());
@@ -2084,10 +2122,10 @@ index 0000000..9b6d30b
 +	}
 +}
 diff --git a/src/IOService.h b/src/IOService.h
-index ab8f5c3..08d34e7 100644
+index ab8f5c3..da7d29f 100644
 --- a/src/IOService.h
 +++ b/src/IOService.h
-@@ -23,6 +23,11 @@
+@@ -23,19 +23,38 @@
  #include "IORegistryEntry.h"
  #include <IOKit/IOKitLib.h>
  #include <IOKit/IOKitLibPrivate.h>
@@ -2099,7 +2137,10 @@ index ab8f5c3..08d34e7 100644
  
  class IOService : public IORegistryEntry
  {
-@@ -32,10 +37,23 @@ public:
+ public:
+ 	IOService();
++	explicit IOService(uint64_t registryID) : IORegistryEntry(registryID) {}
+ 	virtual NSDictionary* matchingDictionary() = 0;
  	bool matches(NSDictionary* dict);
  	bool conformsTo(const char* className) override;
  
@@ -2124,10 +2165,10 @@ index ab8f5c3..08d34e7 100644
  	uint64_t m_accumulatedBusyTime = 0;
  	uint64_t m_state = kIOServiceRegisteredState | kIOServiceMatchedState;
 diff --git a/src/IOService.mm b/src/IOService.mm
-index 0316b30..25904fa 100644
+index 0316b30..d05049a 100644
 --- a/src/IOService.mm
 +++ b/src/IOService.mm
-@@ -18,6 +18,11 @@
+@@ -18,7 +18,14 @@
  */
  
  #include "IOService.h"
@@ -2137,9 +2178,28 @@ index 0316b30..25904fa 100644
 +#include <cstring>
 +#include <os/log.h>
  #import <Foundation/NSArray.h>
++#import <Foundation/NSNumber.h>
++#include <IOKit/IOKitKeys.h>
  
  extern "C" {
-@@ -71,6 +76,92 @@ bool IOService::conformsTo(const char* className)
+ #include "iokitmigServer.h"
+@@ -36,6 +43,15 @@ bool IOService::matches(NSDictionary* dict)
+ 
+ 	for (NSString* key in dict)
+ 	{
++		// IORegistryEntryIDMatching(): the entry with that registry ID
++		if ([key isEqualToString: @kIORegistryEntryIDKey])
++		{
++			NSObject* expected = dict[key];
++			if (![expected isKindOfClass: [NSNumber class]] || [(NSNumber*) expected unsignedLongLongValue] != this->id())
++				return false;
++			continue;
++		}
++
+ 		NSObject* ourProp = ourProps[key];
+ 		NSObject* expectedValue = dict[key];
+ 
+@@ -71,6 +87,92 @@ bool IOService::conformsTo(const char* className)
  	return IOObject::conformsTo(className);
  }
  
@@ -3524,10 +3584,19 @@ index 7a6fcfa..26a7d68 100644
  	}
  }
 diff --git a/src/IORegistryEntry.h b/src/IORegistryEntry.h
-index 90155ed..e955bd4 100644
+index 90155ed..0db159b 100644
 --- a/src/IORegistryEntry.h
 +++ b/src/IORegistryEntry.h
-@@ -19,6 +19,8 @@ public:
+@@ -12,6 +12,8 @@ class IORegistryEntry : public IOObject
+ {
+ public:
+ 	IORegistryEntry();
++	// Takes registryID when it is free (check id() afterwards), otherwise the next free ID.
++	explicit IORegistryEntry(uint64_t registryID);
+ 	~IORegistryEntry();
+ 	virtual NSDictionary* getProperties();
+ 
+@@ -19,6 +21,8 @@ public:
  
  	std::string_view getPathName(const char* plane);
  	std::string getPath(const char* plane);
@@ -3536,7 +3605,7 @@ index 90155ed..e955bd4 100644
  	std::set<IORegistryEntry*> getParents(const char* plane);
  	std::set<IORegistryEntry*> getChildren(const char* plane);
  	std::string getName(const char* plane = nullptr);
-@@ -32,8 +34,8 @@ public:
+@@ -32,12 +36,13 @@ public:
  	void registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent);
  protected:
  	// The key is the plane name, e.g. kIOServicePlane (as declared in IOKit/IOKitKeys.h)
@@ -3547,6 +3616,11 @@ index 90155ed..e955bd4 100644
  	uint64_t m_id;
  
  	static std::unordered_map<uint64_t, IORegistryEntry*> m_entriesById;
+ 	static uint64_t m_nextId;
++	static uint64_t allocateId(uint64_t wanted);
+ 	static std::shared_mutex m_entriesByIdMutex;
+ };
+ 
 diff --git a/src/PlatformIdentity.h b/src/PlatformIdentity.h
 new file mode 100644
 index 0000000..6c87959
@@ -3634,3 +3708,261 @@ index 0000000..6c87959
 +}
 +}
 +#endif
+diff --git a/src/IOGraphicsDevices.h b/src/IOGraphicsDevices.h
+new file mode 100644
+--- /dev/null
++++ b/src/IOGraphicsDevices.h
+@@ -0,0 +1,65 @@
++#ifndef IOKITD_IOGRAPHICSDEVICES_H
++#define IOKITD_IOGRAPHICSDEVICES_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++#include <cstdint>
++#include <string>
++
++// The GPUs of a MacBookPro16,1, as Metal reports them: an IOPCIDevice per host GPU with an
++// accelerator child whose registry entry ID is the MTLDevice.registryID. Apps follow that ID to
++// read the PCI vendor and device IDs (Dawn's GetDeviceIORegistryPCIInfo, ANGLE's GetPCIDevices).
++//
++// Keep the IDs and the vendor mapping in sync with private-include/Metal/MTLDeviceInfo.h
++// (kDiscreteRegistryID, kIntegratedRegistryID, registryIDForVendor and macGpuName).
++namespace IOGraphicsIdentity
++{
++	static constexpr uint64_t kDiscreteRegistryID = 0x100000439ULL;
++	static constexpr uint64_t kIntegratedRegistryID = 0x100000427ULL;
++
++	struct Profile
++	{
++		uint32_t vendorID, deviceID, revisionID;
++		const char* model;            // nullptr: the host's own GPU, whose Metal name iokitd cannot know
++		const char* pciName;          // MacBookPro16,1 ACPI name
++		const char* acceleratorClass;
++		uint64_t registryID;
++		uint32_t vramMB;              // 0: shares system memory, or unknown
++	};
++
++	// Host PCI vendor/device/revision -> the identity reported for it; false for vendors Metal
++	// never maps (the GPU is then left out). AMD and Intel take the MacBookPro16,1 GPU of the same
++	// vendor; NVIDIA keeps its own IDs, as Metal keeps its own name.
++	bool profileForHost(uint32_t vendorID, uint32_t deviceID, uint32_t revisionID, Profile* profile);
++}
++
++class IOPCIDevice : public IOService
++{
++public:
++	explicit IOPCIDevice(const IOGraphicsIdentity::Profile& profile) : m_profile(profile) {}
++	const char* className() const override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++private:
++	IOGraphicsIdentity::Profile m_profile;
++};
++
++class IOGraphicsAccelerator : public IOService
++{
++public:
++	explicit IOGraphicsAccelerator(const IOGraphicsIdentity::Profile& profile);
++	const char* className() const override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++private:
++	IOGraphicsIdentity::Profile m_profile;
++};
++
++namespace IOGraphicsDevices
++{
++	// Publishes one integrated and one discrete GPU at most, from the host's DRM cards.
++	void discoverDevices(ServiceRegistry* registry, IORegistryEntry* platform);
++}
++
++#endif
+diff --git a/src/IOGraphicsDevices.mm b/src/IOGraphicsDevices.mm
+new file mode 100644
+--- /dev/null
++++ b/src/IOGraphicsDevices.mm
+@@ -0,0 +1,183 @@
++#include "IOGraphicsDevices.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++#include <os/log.h>
++#include <dirent.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++
++using IOGraphicsIdentity::Profile;
++
++static const char* const kHostDrmDir = "/Volumes/SystemRoot/sys/class/drm";
++
++bool IOGraphicsIdentity::profileForHost(uint32_t vendorID, uint32_t deviceID, uint32_t revisionID, Profile* profile)
++{
++	switch (vendorID)
++	{
++	case 0x1002:
++		*profile = { 0x1002, 0x7340, revisionID, "AMD Radeon Pro 5500M", "GFX0",
++			"AMDRadeonX6000_AMDNavi14GraphicsAccelerator", kDiscreteRegistryID, 4096 };
++		return true;
++	case 0x8086:
++		*profile = { 0x8086, 0x3e9b, revisionID, "Intel UHD Graphics 630", "IGPU",
++			"IntelAccelerator", kIntegratedRegistryID, 0 };
++		return true;
++	case 0x10de:
++		*profile = { 0x10de, deviceID, revisionID, nullptr, "GFX0", "nvAccelerator", kDiscreteRegistryID, 0 };
++		return true;
++	default:
++		return false;
++	}
++}
++
++// PCI configuration values are 32-bit little-endian data, as on macOS
++static NSData* pciValue(uint32_t value)
++{
++	const uint8_t bytes[4] = { uint8_t(value), uint8_t(value >> 8), uint8_t(value >> 16), uint8_t(value >> 24) };
++	return [NSData dataWithBytes: bytes length: sizeof(bytes)];
++}
++
++static NSData* dataForString(const char* string)
++{
++	return [NSData dataWithBytes: string length: strlen(string) + 1];
++}
++
++const char* IOPCIDevice::className() const
++{
++	return "IOPCIDevice";
++}
++
++NSDictionary* IOPCIDevice::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @"IOPCIDevice",
++		@"IOClass": @"IOPCIDevice",
++	};
++}
++
++NSDictionary* IOPCIDevice::getProperties()
++{
++	NSMutableDictionary* properties = [NSMutableDictionary dictionaryWithDictionary: @{
++		@"IOName": @"display",
++		@"name": dataForString("display"),
++		@"vendor-id": pciValue(m_profile.vendorID),
++		@"device-id": pciValue(m_profile.deviceID),
++		@"revision-id": pciValue(m_profile.revisionID),
++		@"class-code": pciValue(0x030000), // display controller, VGA compatible
++	}];
++	if (m_profile.model)
++		properties[@"model"] = dataForString(m_profile.model);
++	if (m_profile.vramMB)
++		properties[@"VRAM,totalMB"] = @(m_profile.vramMB);
++	return properties;
++}
++
++IOGraphicsAccelerator::IOGraphicsAccelerator(const Profile& profile)
++: IOService(profile.registryID), m_profile(profile)
++{
++}
++
++const char* IOGraphicsAccelerator::className() const
++{
++	return m_profile.acceleratorClass;
++}
++
++NSDictionary* IOGraphicsAccelerator::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @[ [NSString stringWithUTF8String: m_profile.acceleratorClass], @"IOAccelerator", @"IOGraphicsAccelerator2" ],
++		@"IOClass": [NSString stringWithUTF8String: m_profile.acceleratorClass],
++	};
++}
++
++NSDictionary* IOGraphicsAccelerator::getProperties()
++{
++	return @{
++		@"IOClass": [NSString stringWithUTF8String: m_profile.acceleratorClass],
++		@"IOProviderClass": @"IOPCIDevice",
++		@"IOMatchCategory": @"IOAccelerator",
++	};
++}
++
++bool IOGraphicsAccelerator::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOAccelerator") == 0 || std::strcmp(className, "IOGraphicsAccelerator2") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++static bool readHex(const std::string& path, uint32_t* value)
++{
++	FILE* file = fopen(path.c_str(), "r");
++	if (!file)
++		return false;
++	char buffer[32] = {};
++	const bool read = fgets(buffer, sizeof(buffer), file) != nullptr;
++	fclose(file);
++	if (!read)
++		return false;
++	char* end = nullptr;
++	const unsigned long parsed = strtoul(buffer, &end, 16);
++	if (end == buffer || parsed > UINT32_MAX)
++		return false;
++	*value = uint32_t(parsed);
++	return true;
++}
++
++void IOGraphicsDevices::discoverDevices(ServiceRegistry* registry, IORegistryEntry* platform)
++{
++	// cardN only (cardN-<connector> entries are outputs), in card order
++	std::map<long, std::string> cards;
++	if (DIR* dir = opendir(kHostDrmDir))
++	{
++		while (struct dirent* entry = readdir(dir))
++		{
++			const char* name = entry->d_name;
++			if (std::strncmp(name, "card", 4) != 0 || !name[4])
++				continue;
++			char* end = nullptr;
++			const long index = strtol(name + 4, &end, 10);
++			if (*end == '\0' && index >= 0)
++				cards.emplace(index, std::string(kHostDrmDir) + "/" + name + "/device/");
++		}
++		closedir(dir);
++	}
++
++	bool published[2] = { false, false }; // integrated, discrete
++	for (const auto& card : cards)
++	{
++		uint32_t vendorID, deviceID, revisionID = 0;
++		if (!readHex(card.second + "vendor", &vendorID) || !readHex(card.second + "device", &deviceID))
++			continue;
++		readHex(card.second + "revision", &revisionID);
++
++		Profile profile;
++		if (!IOGraphicsIdentity::profileForHost(vendorID, deviceID, revisionID, &profile))
++			continue;
++		bool& slot = published[profile.registryID == IOGraphicsIdentity::kDiscreteRegistryID];
++		if (slot)
++			continue;
++
++		IOPCIDevice* device = new IOPCIDevice(profile);
++		IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator(profile);
++		if (accelerator->id() != profile.registryID)
++		{
++			// Metal would point at another entry; leave this GPU out rather than mislead
++			os_log_error(OS_LOG_DEFAULT, "iokitd: registry ID %llx is taken; %s not published",
++				(unsigned long long) profile.registryID, profile.acceleratorClass);
++			delete accelerator;
++			delete device;
++			continue;
++		}
++		device->registerInPlane(kIOServicePlane, profile.pciName, platform);
++		accelerator->registerInPlane(kIOServicePlane, profile.acceleratorClass, device);
++		registry->registerService(device);
++		registry->registerService(accelerator);
++		slot = true;
++	}
++}

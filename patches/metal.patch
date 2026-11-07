@@ -1149,7 +1149,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..88ec70f 100644
+index f58184a..1c3728a 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1225,17 +1225,18 @@ index f58184a..88ec70f 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -96,6 +147,9 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -96,6 +147,10 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	NSThread* _pollingThread;
  	NSCondition* _threadExitCondition;
  	BOOL _threadIsRunning;
 +	NSString* _name;
 +	uint64_t _workingSetSize;
++	uint64_t _registryID;
 +	BOOL _sharesSystemMemory;
  }
  
  @synthesize device = _device;
-@@ -116,6 +170,50 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +171,52 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1263,6 +1264,8 @@ index f58184a..88ec70f 100644
 +		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
 +	}
 +
++	_registryID = priv ? MTLDeviceInfo::registryIDForVendor(priv->properties().vendorID) : MTLDeviceInfo::kDefaultRegistryID;
++
 +	uint64_t workingSet = 0;
 +	_sharesSystemMemory = NO;
 +	if (priv) {
@@ -1286,7 +1289,7 @@ index f58184a..88ec70f 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +221,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +224,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1294,7 +1297,7 @@ index f58184a..88ec70f 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +232,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +235,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1302,7 +1305,7 @@ index f58184a..88ec70f 100644
  
  	[super dealloc];
  }
-@@ -153,12 +253,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +256,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1339,7 +1342,7 @@ index f58184a..88ec70f 100644
 +- (BOOL)isRemovable { return NO; }
 +- (BOOL)isHeadless { return NO; }
 +- (NSString*)name { return _name; }
-+- (uint64_t)registryID { return MTLDeviceInfo::kDefaultRegistryID; }
++- (uint64_t)registryID { return _registryID; }
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
@@ -1412,7 +1415,7 @@ index f58184a..88ec70f 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +362,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +365,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1420,7 +1423,7 @@ index f58184a..88ec70f 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +380,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +383,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1435,7 +1438,7 @@ index f58184a..88ec70f 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +394,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +397,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1481,7 +1484,7 @@ index f58184a..88ec70f 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +439,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +442,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1601,7 +1604,7 @@ index f58184a..88ec70f 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +620,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +623,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3637,7 +3640,7 @@ diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDe
 new file mode 100644
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,176 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -3657,7 +3660,17 @@ new file mode 100644
 +// Used when neither the cleaned nor the raw Vulkan name has any characters.
 +static constexpr const char* kFallbackName = "Darling Indium Device";
 +// A real Mac never reports registry ID 0, and apps use it as a key for the device.
-+static constexpr uint64_t kDefaultRegistryID = 0x100000439ULL;
++// MTLDevice.registryID is the IOKit registry entry ID of the GPU's accelerator, which iokitd
++// publishes under an IOPCIDevice carrying the PCI vendor and device IDs. Keep these values and
++// registryIDForVendor in sync with iokitd's src/IOGraphicsDevices.h.
++static constexpr uint64_t kDiscreteRegistryID = 0x100000439ULL;
++static constexpr uint64_t kIntegratedRegistryID = 0x100000427ULL;
++static constexpr uint64_t kDefaultRegistryID = kDiscreteRegistryID;
++
++// iokitd publishes an Intel GPU as the integrated GPU and an AMD or NVIDIA GPU as the discrete one.
++static inline uint64_t registryIDForVendor(uint32_t vendorID) {
++	return vendorID == 0x8086 ? kIntegratedRegistryID : kDiscreteRegistryID;
++}
 +
 +static inline bool isSpace(char c) {
 +	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';

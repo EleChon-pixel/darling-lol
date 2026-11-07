@@ -78,6 +78,19 @@ int main() {
 		std::printf("%s Mac GPU name\n", ok ? "PASS" : "FAIL");
 	}
 
+	// registryID names the accelerator iokitd publishes: Intel is the integrated GPU, the rest discrete.
+	{
+		using namespace MTLDeviceInfo;
+		bool ok = registryIDForVendor(0x8086) == kIntegratedRegistryID
+		       && registryIDForVendor(0x1002) == kDiscreteRegistryID
+		       && registryIDForVendor(0x10de) == kDiscreteRegistryID
+		       && kDefaultRegistryID == kDiscreteRegistryID
+		       && kIntegratedRegistryID != kDiscreteRegistryID
+		       && kIntegratedRegistryID >= 0x100000000ULL;
+		failures += !ok;
+		std::printf("%s registry ID per vendor\n", ok ? "PASS" : "FAIL");
+	}
+
 	// DARLING_METAL_VRAM_MB parsing: positive decimal integer only.
 	const unsigned long long MiB = 1024ull * 1024ull;
 	expectBytes("vram \"8192\"", MTLDeviceInfo::parseMegabytes("8192"), 8192 * MiB);

@@ -173,3 +173,18 @@ value that is not a positive decimal keeps the default). An Intel card is
 reported as `Intel UHD Graphics 630` on bus Built-In with shared memory, as
 `MTLDevice.name` does. This keeps the display report consistent with Metal;
 without the variable the host card is reported as-is.
+
+iokitd publishes the GPUs in the IOKit registry too, from the same host DRM
+cards: an `IOPCIDevice` (`IGPU` for Intel, `GFX0` for AMD or NVIDIA) under the
+platform device, with `vendor-id`, `device-id`, `revision-id` and `class-code`,
+and an accelerator child (`IntelAccelerator`,
+`AMDRadeonX6000_AMDNavi14GraphicsAccelerator` or `nvAccelerator`, all
+conforming to `IOAccelerator`). An Intel or AMD card carries the same
+`MacBookPro16,1` identity as `MTLDevice.name`; an NVIDIA card keeps its own
+vendor and device IDs, as Metal keeps its own name. At most one integrated and
+one discrete GPU are published. The accelerator's registry entry ID is the
+`MTLDevice.registryID` of a device from that vendor (`0x100000427` integrated,
+`0x100000439` discrete), so `IORegistryEntryIDMatching(device.registryID)`
+finds it and its parent's PCI IDs, as Dawn and ANGLE expect. iokitd does not
+see `DARLING_METAL_MAC_GPU_NAME`, so with the variable unset Metal reports the
+host's name while IOKit keeps the Mac identity.
