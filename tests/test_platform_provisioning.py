@@ -104,6 +104,8 @@ class ProvisioningChecks(unittest.TestCase):
             'gpu.discrete.vendor': '0x1002',
             'gpu.discrete.device': '0x7340',
             'home.isolated': '1',
+            'host.hide': '1',
+            'cpu.emulate_cpuid': '1',
         })
         version = plistlib.loads((self.prefix /
             'System/Library/CoreServices/SystemVersion.plist').read_bytes())
