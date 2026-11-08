@@ -3732,7 +3732,7 @@ index 0000000..9a9f1f0
 +	return total;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..84059e9 100644
+index f273989..32a4689 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,9 @@
@@ -3783,7 +3783,7 @@ index f273989..84059e9 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +61,80 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +61,84 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3792,7 +3792,11 @@ index f273989..84059e9 100644
 +static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
-+static sysctl_handler(handle_cache_value);
++#define CACHE_VALUE_HANDLERS(X) \
++	X(CACHELINE) X(L1ICACHESIZE) X(L1DCACHESIZE) X(L2CACHESIZE) X(L3CACHESIZE) X(TBFREQUENCY)
++#define DECLARE_CACHE_VALUE(id) \
++	static sysctl_handler(handle_##id); static sysctl_handler(handle_##id##_compat);
++CACHE_VALUE_HANDLERS(DECLARE_CACHE_VALUE)
 +static sysctl_handler(handle_cpufamily);
 +
 +/* hw.optional: CPUID leaf, output register (0-3 = eax-edx) and bit */
@@ -3865,7 +3869,7 @@ index f273989..84059e9 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +146,25 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,7 +150,25 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3877,22 +3881,22 @@ index f273989..84059e9 100644
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
 +	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
-+	{ .oid = _HW_CACHELINE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cachelinesize", .handler = handle_cache_value },
-+	{ .oid = _HW_L1ICACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1icachesize", .handler = handle_cache_value },
-+	{ .oid = _HW_L1DCACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1dcachesize", .handler = handle_cache_value },
-+	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_cache_value },
-+	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_cache_value },
-+	{ .oid = _HW_TBFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "tbfrequency", .handler = handle_cache_value },
-+	{ .oid = _HW_CACHELINE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cachelinesize_compat", .handler = handle_cache_value },
-+	{ .oid = _HW_L1ICACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1icachesize_compat", .handler = handle_cache_value },
-+	{ .oid = _HW_L1DCACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1dcachesize_compat", .handler = handle_cache_value },
-+	{ .oid = _HW_L2CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l2cachesize_compat", .handler = handle_cache_value },
-+	{ .oid = _HW_L3CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l3cachesize_compat", .handler = handle_cache_value },
-+	{ .oid = _HW_TBFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "tbfrequency_compat", .handler = handle_cache_value },
++	{ .oid = _HW_CACHELINE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cachelinesize", .handler = handle_CACHELINE },
++	{ .oid = _HW_L1ICACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1icachesize", .handler = handle_L1ICACHESIZE },
++	{ .oid = _HW_L1DCACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1dcachesize", .handler = handle_L1DCACHESIZE },
++	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_L2CACHESIZE },
++	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_L3CACHESIZE },
++	{ .oid = _HW_TBFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "tbfrequency", .handler = handle_TBFREQUENCY },
++	{ .oid = _HW_CACHELINE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cachelinesize_compat", .handler = handle_CACHELINE_compat },
++	{ .oid = _HW_L1ICACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1icachesize_compat", .handler = handle_L1ICACHESIZE_compat },
++	{ .oid = _HW_L1DCACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1dcachesize_compat", .handler = handle_L1DCACHESIZE_compat },
++	{ .oid = _HW_L2CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l2cachesize_compat", .handler = handle_L2CACHESIZE_compat },
++	{ .oid = _HW_L3CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l3cachesize_compat", .handler = handle_L3CACHESIZE_compat },
++	{ .oid = _HW_TBFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "tbfrequency_compat", .handler = handle_TBFREQUENCY_compat },
  	{ .oid = -1 }
  };
  
-@@ -71,6 +180,47 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +184,47 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -3940,7 +3944,7 @@ index f273989..84059e9 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +233,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +237,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3954,7 +3958,7 @@ index f273989..84059e9 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +326,58 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +330,58 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -4020,7 +4024,7 @@ index f273989..84059e9 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +392,194 @@ sysctl_handler(handle_machine)
+@@ -193,3 +396,194 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4124,38 +4128,32 @@ index f273989..84059e9 100644
 +// hw.cachelinesize, hw.l1icachesize, hw.l1dcachesize, hw.l2cachesize, hw.l3cachesize and
 +// hw.tbfrequency: 64-bit by name, XNU's legacy 32-bit for the numeric OIDs. Intel Macs
 +// count the timebase in nanoseconds.
-+sysctl_handler(handle_cache_value)
++static bool cache_value(int oid, unsigned long long* value)
 +{
-+	unsigned long long value = 0;
 +	unsigned int sharing;
-+	bool compat = false;
 +
-+	switch (name[nlen - 1])
++	switch (oid)
 +	{
-+	case _HW_CACHELINE_COMPAT: compat = true; /* fall through */
-+	case _HW_CACHELINE: value = 64; break;
-+	case _HW_L1ICACHESIZE_COMPAT: compat = true; /* fall through */
-+	case _HW_L1ICACHESIZE: if (!cache_level(1, true, &value, &sharing)) return -ENOENT; break;
-+	case _HW_L1DCACHESIZE_COMPAT: compat = true; /* fall through */
-+	case _HW_L1DCACHESIZE: if (!cache_level(1, false, &value, &sharing)) return -ENOENT; break;
-+	case _HW_L2CACHESIZE_COMPAT: compat = true; /* fall through */
-+	case _HW_L2CACHESIZE: if (!cache_level(2, false, &value, &sharing)) return -ENOENT; break;
-+	case _HW_L3CACHESIZE_COMPAT: compat = true; /* fall through */
-+	case _HW_L3CACHESIZE: if (!cache_level(3, false, &value, &sharing)) return -ENOENT; break;
-+	case _HW_TBFREQUENCY_COMPAT: compat = true; /* fall through */
-+	case _HW_TBFREQUENCY: value = 1000000000ULL; break;
-+	default: return -ENOENT;
++	case _HW_CACHELINE: *value = 64; return true;
++	case _HW_L1ICACHESIZE: return cache_level(1, true, value, &sharing);
++	case _HW_L1DCACHESIZE: return cache_level(1, false, value, &sharing);
++	case _HW_L2CACHESIZE: return cache_level(2, false, value, &sharing);
++	case _HW_L3CACHESIZE: return cache_level(3, false, value, &sharing);
++	case _HW_TBFREQUENCY: *value = 1000000000ULL; return true;
++	default: return false;
 +	}
-+	if (compat)
++}
++
++static long copyout_cache_value(int oid, bool compat, void* old, unsigned long* oldlen)
++{
++	unsigned long long value;
++
++	if (!cache_value(oid, &value))
++		return -ENOENT;
++	// Numeric OIDs, and callers that pass an int by name, get XNU's 32-bit value.
++	if (compat || (old != NULL && oldlen != NULL && *oldlen == sizeof(uint32_t)))
 +	{
 +		sysctl_handle_size(sizeof(uint32_t));
-+		*((uint32_t*) old) = (uint32_t) value;
-+		return 0;
-+	}
-+	// Callers that pass an int still get the value, as XNU's sysctlbyname does for
-+	// values that fit.
-+	if (old != NULL && oldlen != NULL && *oldlen == sizeof(uint32_t))
-+	{
 +		*((uint32_t*) old) = (uint32_t) value;
 +		return 0;
 +	}
@@ -4163,6 +4161,12 @@ index f273989..84059e9 100644
 +	*((uint64_t*) old) = value;
 +	return 0;
 +}
++
++// Handlers get no OID of their own, so each value has one.
++#define DEFINE_CACHE_VALUE(id) \
++	static sysctl_handler(handle_##id) { return copyout_cache_value(_HW_##id, false, old, oldlen); } \
++	static sysctl_handler(handle_##id##_compat) { return copyout_cache_value(_HW_##id, true, old, oldlen); }
++CACHE_VALUE_HANDLERS(DEFINE_CACHE_VALUE)
 +
 +// hw.cacheconfig[0] is the number of logical CPUs, [n] the number of CPUs sharing a level n cache
 +sysctl_handler(handle_cacheconfig)
