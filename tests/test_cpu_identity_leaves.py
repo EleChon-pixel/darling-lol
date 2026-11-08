@@ -96,6 +96,10 @@ int main(void) {
         hidden = guest_view.split('static bool lexically_hidden(', 1)[1].split('\n}\n', 1)[0]
         self.assertIn('strncmp(at, "shm", 3) == 0', hidden)
         self.assertIn('darling_file_name(record)', hidden)
+        # The compositor finds frame slots with opendir("/dev/shm"): a directory open of
+        # exactly /dev/shm is allowed and lists only darling-* records.
+        self.assertIn('if (!darling_shm_directory(path, flags))', guest_view)
+        self.assertIn('!darling_file_name(name);', guest_view.split('static bool hidden_entry(', 1)[1])
 
     def test_process_names_come_from_the_executable(self):
         proc_info = new_side('xnu_syscall/bsd/impl/misc/proc_info.c')
