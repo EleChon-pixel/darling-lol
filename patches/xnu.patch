@@ -3064,10 +3064,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..59e9a65
+index 0000000..de128a9
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,699 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3084,6 +3084,7 @@ index 0000000..59e9a65
 +#include <darling/emulation/linux_premigration/vchroot_expand.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/conf/pathconf.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/dirent/getdirentries.h>
++#include <darling/emulation/conversion/fcntl/open.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/openat.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/process/execve.h>
@@ -3320,15 +3321,36 @@ index 0000000..59e9a65
 +#define AT_CWD_LINUX (-100)
 +#define HIDE(dfd, path, follow) do { if (darling_guest_path_hidden((dfd), (path), (follow))) return -ENOENT; } while (0)
 +
++/*
++ * Darling's compositor (cocotron X11Window, CALayer) finds the frame slots other
++ * processes publish by listing /dev/shm from inside the application. A directory open
++ * of exactly /dev/shm is therefore allowed, and its listing shows only Darling's own
++ * darling-* records; stat, access and the listing of /dev still say it does not exist.
++ */
++static bool darling_shm_directory(const char* path, int flags)
++{
++	const char* p = path;
++	const char* rest;
++
++	if (!(flags & BSD_O_DIRECTORY) || path == NULL || path[0] != '/')
++		return false;
++	if (!component_is(&p, "dev") || !component_is(&p, "shm"))
++		return false;
++	rest = p;
++	return next_component(&rest) == 0;
++}
++
 +long guarded_open(const char* path, int flags, unsigned int mode)
 +{
-+	HIDE(AT_CWD_LINUX, path, true);
++	if (!darling_shm_directory(path, flags))
++		HIDE(AT_CWD_LINUX, path, true);
 +	return sys_open(path, flags, mode);
 +}
 +
 +long guarded_open_nocancel(const char* path, int flags, unsigned int mode)
 +{
-+	HIDE(AT_CWD_LINUX, path, true);
++	if (!darling_shm_directory(path, flags))
++		HIDE(AT_CWD_LINUX, path, true);
 +	return sys_open_nocancel(path, flags, mode);
 +}
 +
@@ -3654,6 +3676,10 @@ index 0000000..59e9a65
 +	/* /dev is Darling's link to the host /dev, so its descriptor resolves there. */
 +	if (strcmp(directory, "/dev") == 0 || (istarts(directory, "/volumes/systemroot/dev") && directory[23] == '\0'))
 +		return strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && !dev_name_visible(name, strlen(name), false);
++	/* /dev/shm opens only as a directory, for Darling's compositor: only its records. */
++	if (strcmp(directory, "/dev/shm") == 0 ||
++		(istarts(directory, "/volumes/systemroot/dev/shm") && directory[27] == '\0'))
++		return strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && !darling_file_name(name);
 +	if (strcmp(directory, "/private/etc") == 0 || strcmp(directory, "/etc") == 0)
 +		return darling_file_name(name);
 +	/* /usr/lib/darling stays reachable by path (Metal links libindium from it). */
