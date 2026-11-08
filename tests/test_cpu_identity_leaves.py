@@ -89,6 +89,22 @@ int main(void) {
         self.assertIn('.name = "uuid"', kern)
         self.assertIn('.name = "bootsessionuuid"', kern)
 
+    def test_darling_shm_records_stay_reachable(self):
+        # CoreVideo and OpenGL open /dev/shm/darling-* from inside applications; hiding
+        # them leaves Chromium windows black.
+        guest_view = new_side('xnu_syscall/bsd/helper/misc/guest_view.c')
+        hidden = guest_view.split('static bool lexically_hidden(', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('strncmp(at, "shm", 3) == 0', hidden)
+        self.assertIn('darling_file_name(record)', hidden)
+
+    def test_process_names_come_from_the_executable(self):
+        proc_info = new_side('xnu_syscall/bsd/impl/misc/proc_info.c')
+        self.assertIn('bool darling_process_name(int pid, char* name, size_t size)', proc_info)
+        self.assertIn('darling_process_name(pid, info->pbsi_comm', proc_info)
+        self.assertIn('darling_process_name(pid, info->pbi_name', proc_info)
+        self.assertIn('darling_process_name(kinfo->kinfo.kp_proc.p_pid',
+                      new_side('xnu_syscall/bsd/helper/misc/sysctl_proc.c'))
+
     def test_proc_listpids_is_implemented(self):
         proc_info = new_side('xnu_syscall/bsd/impl/misc/proc_info.c')
         self.assertIn('return _proc_listpids((uint32_t) pid, flavor, (int*) buffer, bufsize);', proc_info)
