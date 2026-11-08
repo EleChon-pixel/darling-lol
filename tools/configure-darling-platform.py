@@ -31,6 +31,9 @@ HARDWARE_PROFILES = {
         'cpu_family_id': 0x0F817246,
         'cpu_frequency': 2400000000,
         'threads_per_core': 2,
+        # L1I, L1D, L2 (per core), L3 (shared) in bytes; CPUID leaf 4 and hw.l*cachesize.
+        'caches': (32768, 32768, 262144, 16777216),
+        'cpuid_max_leaf': 0x16,
         'hostname': 'MacBook-Pro.local',
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
         'gpu_discrete': ('AMD Radeon Pro 5500M', 0x1002, 0x7340),
@@ -50,6 +53,8 @@ HARDWARE_PROFILES = {
         'cpu_family_id': 0x0F817246,
         'cpu_frequency': 3100000000,
         'threads_per_core': 2,
+        'caches': (32768, 32768, 262144, 12582912),
+        'cpuid_max_leaf': 0x16,
         'hostname': 'iMac.local',
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x9BC8),
         'gpu_discrete': ('AMD Radeon Pro 5300', 0x1002, 0x7340),
@@ -89,7 +94,9 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'cpu.threads_per_core', 'kern.hostname',
                          'gpu.integrated.name', 'gpu.integrated.vendor', 'gpu.integrated.device',
                          'gpu.discrete.name', 'gpu.discrete.vendor', 'gpu.discrete.device',
-                         'home.isolated', 'host.hide', 'cpu.emulate_cpuid')
+                         'home.isolated', 'host.hide', 'cpu.emulate_cpuid',
+                         'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
+                         'cpu.cpuid_max_leaf', 'kern.uuid')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
@@ -229,7 +236,16 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
         'hw.cpufrequency': str(selected['cpu_frequency']),
         'cpu.threads_per_core': str(selected['threads_per_core']),
         'kern.hostname': selected['hostname'],
+        # kern.uuid is the kernel's LC_UUID, shared by every Mac on one build; derived
+        # from the build so it stays fixed for an OS profile.
+        'kern.uuid': str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                    'darling-lol:xnu:' + metadata['ProductBuildVersion'])).upper(),
     }
+    if 'caches' in selected:
+        for key, size in zip(('hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize'),
+                             selected['caches']):
+            values[key] = str(size)
+        values['cpu.cpuid_max_leaf'] = '0x%X' % selected['cpuid_max_leaf']
     for slot in ('integrated', 'discrete'):
         name, vendor, device = selected['gpu_' + slot]
         values['gpu.%s.name' % slot] = name

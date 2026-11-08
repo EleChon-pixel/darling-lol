@@ -2117,7 +2117,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..928182d 100644
+index 206e92e..b3f5003 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -6,6 +6,8 @@
@@ -2145,7 +2145,7 @@ index 206e92e..928182d 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -197,8 +204,144 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -197,8 +204,257 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  }
  
  
@@ -2158,22 +2158,103 @@ index 206e92e..928182d 100644
 + * hybrid). With cpu.emulate_cpuid=1 every guest process enables Linux CPUID faulting
 + * (ARCH_SET_CPUID 0, inherited by its threads and reset on exec). A CPUID then raises
 + * SIGSEGV here: the real values are read with faulting briefly off, and the
-+ * identity-bearing leaves are replaced: leaf 1 EAX (signature), leaf 7 EDX bit 15
-+ * (hybrid), leaf 0x16 (frequencies), leaf 0x1A (core type) and the brand string.
-+ * Feature bits stay the host's, since code depends on them being truthful.
++ * identity-bearing leaves are replaced: leaf 1 EAX (signature), leaf 0x16
++ * (frequencies), leaf 0x1A (core type) and the brand string. The host is newer than
++ * any Intel Mac, so the basic leaves end at the profile's last one (cpu.cpuid_max_leaf,
++ * 0x16 for Coffee/Comet Lake; later leaves answer like it, as on Intel), leaf 7 keeps
++ * only the features Skylake-family client CPUs have (no SHA, GFNI, VAES, PKU, hybrid,
++ * ...; masking only ever removes, so what remains is still truthful), its sub-leaves
++ * end at 0, and leaf 4 describes the profile's caches (hw.l1icachesize, hw.l1dcachesize,
++ * hw.l2cachesize, hw.l3cachesize), the same ones sysctl reports.
 + */
 +#define LINUX_ARCH_SET_CPUID 0x1012
 +#define LINUX_SI_KERNEL 0x80
++
++/* Leaf 7.0 features of Skylake/Kaby/Coffee/Comet Lake client CPUs. EBX: FSGSBASE,
++ * TSC_ADJUST, SGX, BMI1, HLE, AVX2, FDP_EXCPTN_ONLY, SMEP, BMI2, ERMS, INVPCID, RTM,
++ * FPU CS/DS deprecation, MPX, RDSEED, ADX, SMAP, CLFLUSHOPT, Processor Trace.
++ * ECX: SGX_LC. EDX: MD_CLEAR, TSX_FORCE_ABORT, IBRS/IBPB, STIBP, L1D_FLUSH,
++ * ARCH_CAPABILITIES, SSBD. */
++#define CPUID7_EBX_KEEP 0x029C6FFFu
++#define CPUID7_ECX_KEEP 0x40000000u
++#define CPUID7_EDX_KEEP 0xBC002400u
++
++struct cpuid_cache
++{
++	unsigned int eax, ebx, ecx, edx;
++};
 +
 +struct cpuid_identity
 +{
 +	bool faulting;
 +	bool configured;
++	bool caches;
 +	unsigned int signature;
 +	unsigned int base_mhz;
++	unsigned int max_leaf;
 +	unsigned int brand[12];
++	struct cpuid_cache cache[4]; /* L1D, L1I, L2, L3; leaf 4 sub-leaf 4 and later: none */
 +};
 +static struct cpuid_identity cpuid_identity;
++
++static unsigned long long identity_number(const char* data, const char* key)
++{
++	char value[32];
++	unsigned long long number = 0;
++	const char* p = value;
++	unsigned int base = 10;
++
++	if (!darling_identity_lookup(data, key, value, sizeof(value)))
++		return 0;
++	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
++	for (; *p; p++)
++	{
++		unsigned int digit = (*p >= '0' && *p <= '9') ? (unsigned)(*p - '0') :
++			(*p >= 'a' && *p <= 'f') ? (unsigned)(*p - 'a' + 10) :
++			(*p >= 'A' && *p <= 'F') ? (unsigned)(*p - 'A' + 10) : 99;
++		if (digit >= base || number > (~0ULL >> 8))
++			return 0;
++		number = number * base + digit;
++	}
++	return number;
++}
++
++/* One deterministic-cache-parameters entry (leaf 4): 64-byte lines, one partition. */
++static bool cpuid_cache_entry(struct cpuid_cache* entry, unsigned int type, unsigned int level,
++	unsigned long long size, unsigned int ways, unsigned int sharing, unsigned int cores, unsigned int edx)
++{
++	unsigned long long sets = size / (64ULL * ways);
++	if (size == 0 || sets == 0 || sets > 0x100000000ULL || size % (64ULL * ways))
++		return false;
++	entry->eax = type | (level << 5) | (1u << 8) | ((sharing - 1) << 14) | ((cores - 1) << 26);
++	entry->ebx = ((ways - 1) << 22) | 63;
++	entry->ecx = (unsigned int)(sets - 1);
++	entry->edx = edx;
++	return true;
++}
++
++static void cpuid_cache_setup(const char* data)
++{
++	unsigned long long threads = identity_number(data, "cpu.threads_per_core");
++	unsigned char mask[128];
++	unsigned int logical = 0, cores;
++	long got = LINUX_SYSCALL(__NR_sched_getaffinity, 0, sizeof(mask), mask);
++
++	for (long i = 0; i < got; i++)
++		for (unsigned int bit = mask[i]; bit; bit &= bit - 1)
++			logical++;
++	if (threads < 1 || threads > 8 || logical < threads)
++		return;
++	cores = logical / (unsigned int) threads;
++	if (cores > 64)
++		cores = 64;
++	cpuid_identity.caches =
++		cpuid_cache_entry(&cpuid_identity.cache[0], 1, 1, identity_number(data, "hw.l1dcachesize"), 8, threads, cores, 0) &&
++		cpuid_cache_entry(&cpuid_identity.cache[1], 2, 1, identity_number(data, "hw.l1icachesize"), 8, threads, cores, 0) &&
++		cpuid_cache_entry(&cpuid_identity.cache[2], 3, 2, identity_number(data, "hw.l2cachesize"), 4, threads, cores, 0) &&
++		cpuid_cache_entry(&cpuid_identity.cache[3], 3, 3, identity_number(data, "hw.l3cachesize"), 16,
++			logical > 4096 ? 4096 : logical, cores, 6 /* inclusive, complex indexing */);
++}
 +
 +static void cpuid_identity_setup(void)
 +{
@@ -2214,6 +2295,10 @@ index 206e92e..928182d 100644
 +		brand[i] = value[i];
 +	if (cpuid_identity.signature == 0)
 +		return;
++	cpuid_identity.max_leaf = (unsigned int) identity_number(data, "cpu.cpuid_max_leaf");
++	if (cpuid_identity.max_leaf < 7 || cpuid_identity.max_leaf > 0x40)
++		cpuid_identity.max_leaf = 0x16;
++	cpuid_cache_setup(data);
 +	cpuid_identity.configured = true;
 +	cpuid_identity.faulting = LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 0) == 0;
 +}
@@ -2236,18 +2321,46 @@ index 206e92e..928182d 100644
 +
 +	leaf = (unsigned int) ctxt->uc_mcontext.gregs.rax;
 +	subleaf = (unsigned int) ctxt->uc_mcontext.gregs.rcx;
++	/* Past the last basic leaf Intel CPUs answer with the last basic leaf. */
++	if (leaf > cpuid_identity.max_leaf && leaf < 0x40000000)
++		leaf = cpuid_identity.max_leaf;
 +	LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 1);
 +	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "0"(leaf), "2"(subleaf));
 +	LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 0);
 +
 +	switch (leaf)
 +	{
++	case 0:
++		if (a > cpuid_identity.max_leaf)
++			a = cpuid_identity.max_leaf;
++		break;
 +	case 1:
 +		a = cpuid_identity.signature;
 +		break;
++	case 4:
++		if (cpuid_identity.caches)
++		{
++			if (subleaf < 4)
++			{
++				a = cpuid_identity.cache[subleaf].eax;
++				b = cpuid_identity.cache[subleaf].ebx;
++				c = cpuid_identity.cache[subleaf].ecx;
++				d = cpuid_identity.cache[subleaf].edx;
++			}
++			else
++				a = b = c = d = 0;
++		}
++		break;
 +	case 7:
 +		if (subleaf == 0)
-+			d &= ~(1u << 15); /* not a hybrid part */
++		{
++			a = 0; /* no sub-leaf 1 (AVX-VNNI, ...) */
++			b &= CPUID7_EBX_KEEP;
++			c &= CPUID7_ECX_KEEP;
++			d &= CPUID7_EDX_KEEP; /* also clears hybrid (bit 15) */
++		}
++		else
++			a = b = c = d = 0;
 +		break;
 +	case 0x16:
 +		if (cpuid_identity.base_mhz)
@@ -2290,7 +2403,7 @@ index 206e92e..928182d 100644
  	am_i_ptraced = true;
  
  	__simple_kprintf("darling_sigexc_self()\n");
-@@ -267,13 +410,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +523,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -2462,7 +2575,7 @@ index 206e92e..928182d 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +659,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +772,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -3619,7 +3732,7 @@ index 0000000..9a9f1f0
 +	return total;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..ca7455b 100644
+index f273989..84059e9 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,9 @@
@@ -3640,7 +3753,7 @@ index f273989..ca7455b 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +28,15 @@ enum {
+@@ -24,10 +28,28 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -3650,6 +3763,19 @@ index f273989..ca7455b 100644
 +	_HW_CACHECONFIG = 1200,
 +	_HW_CACHESIZE,
 +	_HW_CPUFAMILY = 1300,
++	// XNU's numeric 32-bit OIDs; by-name queries use the 64-bit OIDs after them.
++	_HW_CACHELINE_COMPAT = 16,
++	_HW_L1ICACHESIZE_COMPAT = 17,
++	_HW_L1DCACHESIZE_COMPAT = 18,
++	_HW_L2CACHESIZE_COMPAT = 20,
++	_HW_L3CACHESIZE_COMPAT = 22,
++	_HW_TBFREQUENCY_COMPAT = 23,
++	_HW_CACHELINE = 1400,
++	_HW_L1ICACHESIZE,
++	_HW_L1DCACHESIZE,
++	_HW_L2CACHESIZE,
++	_HW_L3CACHESIZE,
++	_HW_TBFREQUENCY,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -3657,7 +3783,7 @@ index f273989..ca7455b 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +48,79 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +61,80 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3666,6 +3792,7 @@ index f273989..ca7455b 100644
 +static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
++static sysctl_handler(handle_cache_value);
 +static sysctl_handler(handle_cpufamily);
 +
 +/* hw.optional: CPUID leaf, output register (0-3 = eax-edx) and bit */
@@ -3738,7 +3865,7 @@ index f273989..ca7455b 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +132,13 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,7 +146,25 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3750,10 +3877,22 @@ index f273989..ca7455b 100644
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
 +	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
++	{ .oid = _HW_CACHELINE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cachelinesize", .handler = handle_cache_value },
++	{ .oid = _HW_L1ICACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1icachesize", .handler = handle_cache_value },
++	{ .oid = _HW_L1DCACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1dcachesize", .handler = handle_cache_value },
++	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_cache_value },
++	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_cache_value },
++	{ .oid = _HW_TBFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "tbfrequency", .handler = handle_cache_value },
++	{ .oid = _HW_CACHELINE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cachelinesize_compat", .handler = handle_cache_value },
++	{ .oid = _HW_L1ICACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1icachesize_compat", .handler = handle_cache_value },
++	{ .oid = _HW_L1DCACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l1dcachesize_compat", .handler = handle_cache_value },
++	{ .oid = _HW_L2CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l2cachesize_compat", .handler = handle_cache_value },
++	{ .oid = _HW_L3CACHESIZE_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "l3cachesize_compat", .handler = handle_cache_value },
++	{ .oid = _HW_TBFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "tbfrequency_compat", .handler = handle_cache_value },
  	{ .oid = -1 }
  };
  
-@@ -71,6 +154,47 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +180,47 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -3801,7 +3940,7 @@ index f273989..ca7455b 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +207,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +233,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3815,7 +3954,7 @@ index f273989..ca7455b 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +300,58 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +326,58 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3881,7 +4020,7 @@ index f273989..ca7455b 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +366,120 @@ sysctl_handler(handle_machine)
+@@ -193,3 +392,194 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3911,9 +4050,9 @@ index f273989..ca7455b 100644
 +
 +// Number of CPUs in a sysfs list such as "0-1,4-5" (darling_cpu_count_list, shared with the topology probe)
 +
-+// Describes the data/unified cache of one level (1 = L1D) of the host's CPU 0.
-+// Instruction caches are skipped, as in XNU. Returns false if the host doesn't report the level.
-+static bool host_cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++// Describes the data/unified (or, with instruction, the instruction) cache of one level
++// of the host's CPU 0. Returns false if the host doesn't report it.
++static bool host_cache(unsigned int level, bool instruction, unsigned long long* size, unsigned int* sharing)
 +{
 +	char path[96], buf[64];
 +
@@ -3929,7 +4068,7 @@ index f273989..ca7455b 100644
 +			continue;
 +
 +		__simple_sprintf(path, HOST_CACHE_DIR "index%d/type", index);
-+		if (!read_string(path, buf, sizeof(buf)) || buf[0] == 'I')
++		if (!read_string(path, buf, sizeof(buf)) || (buf[0] == 'I') != instruction)
 +			continue;
 +
 +		__simple_sprintf(path, HOST_CACHE_DIR "index%d/size", index);
@@ -3949,6 +4088,80 @@ index f273989..ca7455b 100644
 +		return true;
 +	}
 +	return false;
++}
++
++/*
++ * darling-lol: the hardware profile's cache geometry (hw.l1icachesize, hw.l1dcachesize,
++ * hw.l2cachesize, hw.l3cachesize in the runtime identity), so the sizes belong to the
++ * Mac's CPU rather than the host's; CPUID leaf 4 reports the same (sigexc.c). L1 and L2
++ * are per core, shared by its threads; L3 by every logical CPU. Without a profile, the
++ * host's caches.
++ */
++static const char* const profile_cache_keys[] = { NULL, "hw.l1dcachesize", "hw.l2cachesize", "hw.l3cachesize" };
++
++static bool cache_level(unsigned int level, bool instruction, unsigned long long* size, unsigned int* sharing)
++{
++	unsigned long long threads_per_core;
++	const char* key = instruction ? (level == 1 ? "hw.l1icachesize" : NULL) : (level < 4 ? profile_cache_keys[level] : NULL);
++
++	if (key && darling_runtime_identity_u64(key, size))
++	{
++		if (level == 3)
++			*sharing = gethostinfo()->logical_cpu_max;
++		else
++			*sharing = darling_runtime_identity_u64("cpu.threads_per_core", &threads_per_core) &&
++				threads_per_core >= 1 && threads_per_core <= 8 ? (unsigned int) threads_per_core : 1;
++		return true;
++	}
++	return host_cache(level, instruction, size, sharing);
++}
++
++static bool host_cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++{
++	return cache_level(level, false, size, sharing);
++}
++
++// hw.cachelinesize, hw.l1icachesize, hw.l1dcachesize, hw.l2cachesize, hw.l3cachesize and
++// hw.tbfrequency: 64-bit by name, XNU's legacy 32-bit for the numeric OIDs. Intel Macs
++// count the timebase in nanoseconds.
++sysctl_handler(handle_cache_value)
++{
++	unsigned long long value = 0;
++	unsigned int sharing;
++	bool compat = false;
++
++	switch (name[nlen - 1])
++	{
++	case _HW_CACHELINE_COMPAT: compat = true; /* fall through */
++	case _HW_CACHELINE: value = 64; break;
++	case _HW_L1ICACHESIZE_COMPAT: compat = true; /* fall through */
++	case _HW_L1ICACHESIZE: if (!cache_level(1, true, &value, &sharing)) return -ENOENT; break;
++	case _HW_L1DCACHESIZE_COMPAT: compat = true; /* fall through */
++	case _HW_L1DCACHESIZE: if (!cache_level(1, false, &value, &sharing)) return -ENOENT; break;
++	case _HW_L2CACHESIZE_COMPAT: compat = true; /* fall through */
++	case _HW_L2CACHESIZE: if (!cache_level(2, false, &value, &sharing)) return -ENOENT; break;
++	case _HW_L3CACHESIZE_COMPAT: compat = true; /* fall through */
++	case _HW_L3CACHESIZE: if (!cache_level(3, false, &value, &sharing)) return -ENOENT; break;
++	case _HW_TBFREQUENCY_COMPAT: compat = true; /* fall through */
++	case _HW_TBFREQUENCY: value = 1000000000ULL; break;
++	default: return -ENOENT;
++	}
++	if (compat)
++	{
++		sysctl_handle_size(sizeof(uint32_t));
++		*((uint32_t*) old) = (uint32_t) value;
++		return 0;
++	}
++	// Callers that pass an int still get the value, as XNU's sysctlbyname does for
++	// values that fit.
++	if (old != NULL && oldlen != NULL && *oldlen == sizeof(uint32_t))
++	{
++		*((uint32_t*) old) = (uint32_t) value;
++		return 0;
++	}
++	sysctl_handle_size(sizeof(uint64_t));
++	*((uint64_t*) old) = value;
++	return 0;
 +}
 +
 +// hw.cacheconfig[0] is the number of logical CPUs, [n] the number of CPUs sharing a level n cache
@@ -4003,7 +4216,7 @@ index f273989..ca7455b 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..e55eeec 100644
+index bd9cdc2..628ec13 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 @@ -13,6 +13,7 @@
@@ -4014,31 +4227,37 @@ index bd9cdc2..e55eeec 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
-@@ -23,6 +24,7 @@
+@@ -23,6 +24,9 @@
  enum {
  	_KERN_MSGBUF = 1000,
  	_KERN_OSPRODUCTVERSION,
 +	_KERN_HV_VMM_PRESENT,
++	_KERN_UUID,
++	_KERN_BOOTSESSIONUUID,
  
  	_KERN_SEMMNS = 1000,
  };
-@@ -46,6 +48,7 @@ static sysctl_handler(handle_usrstack64);
+@@ -46,6 +50,9 @@ static sysctl_handler(handle_usrstack64);
  static sysctl_handler(handle_sysv_semmns);
  static sysctl_handler(handle_osproductversion);
  static sysctl_handler(handle_osrevision);
 +static sysctl_handler(handle_hv_vmm_present);
++static sysctl_handler(handle_uuid);
++static sysctl_handler(handle_bootsessionuuid);
  
  extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
  extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
-@@ -76,6 +79,7 @@ const struct known_sysctl sysctls_kern[] = {
+@@ -76,6 +83,9 @@ const struct known_sysctl sysctls_kern[] = {
  	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
  	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
  	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
 +	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
++	{ .oid = _KERN_UUID, .type = CTLTYPE_STRING, .exttype = "S", .name = "uuid", .handler = handle_uuid },
++	{ .oid = _KERN_BOOTSESSIONUUID, .type = CTLTYPE_STRING, .exttype = "S", .name = "bootsessionuuid", .handler = handle_bootsessionuuid },
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
-@@ -139,18 +143,23 @@ sysctl_handler(handle_boottime)
+@@ -139,18 +149,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -4068,7 +4287,7 @@ index bd9cdc2..e55eeec 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -188,7 +197,9 @@ sysctl_handler(handle_version)
+@@ -188,7 +203,9 @@ sysctl_handler(handle_version)
  
  sysctl_handler(handle_osversion)
  {
@@ -4079,7 +4298,7 @@ index bd9cdc2..e55eeec 100644
  
  	copyout_string(s, (char*) old, oldlen);
  	return 0;
-@@ -327,7 +338,9 @@ sysctl_handler(handle_usrstack64)
+@@ -327,7 +344,9 @@ sysctl_handler(handle_usrstack64)
  }
  
  static sysctl_handler(handle_osproductversion) {
@@ -4090,7 +4309,7 @@ index bd9cdc2..e55eeec 100644
  	return 0;
  };
  
-@@ -342,3 +355,19 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +361,56 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -4110,8 +4329,45 @@ index bd9cdc2..e55eeec 100644
 +	*((int*) old) = value;
 +	return 0;
 +}
++
++/*
++ * darling-lol: kern.uuid is the running kernel's UUID, the same on every Mac with that
++ * macOS build; the identity file carries one per OS profile. kern.bootsessionuuid is
++ * new on every boot: the host's boot ID, in the uppercase form macOS prints.
++ */
++sysctl_handler(handle_uuid)
++{
++	char value[40];
++
++	if (!darling_runtime_identity_value("kern.uuid", value, sizeof(value)))
++		return -ENOENT;
++	copyout_string(value, (char*) old, oldlen);
++	return 0;
++}
++
++sysctl_handler(handle_bootsessionuuid)
++{
++	char value[48];
++	int length = 0;
++
++	if (!read_string("/Volumes/SystemRoot/proc/sys/kernel/random/boot_id", value, sizeof(value)))
++		return -ENOENT;
++	for (; value[length] && value[length] != '\n'; length++)
++	{
++		char c = value[length];
++		if (c >= 'a' && c <= 'f')
++			value[length] = (char)(c - 'a' + 'A');
++		else if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || c == '-'))
++			return -ENOENT;
++	}
++	value[length] = '\0';
++	if (length != 36)
++		return -ENOENT;
++	copyout_string(value, (char*) old, oldlen);
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..12a5e20 100644
+index 4319355..e82da53 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -4,6 +4,8 @@
@@ -4123,16 +4379,18 @@ index 4319355..12a5e20 100644
  #include <darling/emulation/conversion/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
-@@ -25,6 +27,8 @@ enum {
+@@ -25,6 +27,10 @@ enum {
  	_CPU_BRAND_STRING,
  	_CPU_FEATURES,
  	_CPU_CORE_COUNT,
 +	_CPU_THREAD_COUNT,
 +	_CPU_SIGNATURE,
++	_CPU_LEAF7_FEATURES,
++	_CPU_EXTFEATURES,
  };
  
  static sysctl_handler(handle_vendor);
-@@ -32,9 +36,19 @@ static sysctl_handler(handle_max_basic);
+@@ -32,9 +38,21 @@ static sysctl_handler(handle_max_basic);
  static sysctl_handler(handle_family);
  static sysctl_handler(handle_model);
  static sysctl_handler(handle_stepping);
@@ -4149,12 +4407,14 @@ index 4319355..12a5e20 100644
 +}
 +
 +sysctl_handler(handle_features);
++static sysctl_handler(handle_leaf7_features);
++static sysctl_handler(handle_extfeatures);
  static sysctl_handler(handle_core_count);
 +static sysctl_handler(handle_thread_count);
  
  const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_MAX_BASIC, .type = CTLTYPE_INT, .exttype = "I", .name = "max_basic", .handler = handle_max_basic },
-@@ -42,9 +56,11 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
+@@ -42,9 +60,13 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_FAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "family", .handler = handle_family },
  		{ .oid = _CPU_MODEL, .type = CTLTYPE_INT, .exttype = "I", .name = "model", .handler = handle_model },
  		{ .oid = _CPU_STEPPING, .type = CTLTYPE_INT, .exttype = "I", .name = "stepping", .handler = handle_stepping },
@@ -4164,10 +4424,12 @@ index 4319355..12a5e20 100644
  		{ .oid = _CPU_CORE_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "core_count", .handler = handle_core_count },
 +		{ .oid = _CPU_THREAD_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "thread_count", .handler = handle_thread_count },
 +		{ .oid = _CPU_SIGNATURE, .type = CTLTYPE_INT, .exttype = "I", .name = "signature", .handler = handle_signature },
++		{ .oid = _CPU_LEAF7_FEATURES, .type = CTLTYPE_STRING, .exttype = "S", .name = "leaf7_features", .handler = handle_leaf7_features },
++		{ .oid = _CPU_EXTFEATURES, .type = CTLTYPE_STRING, .exttype = "S", .name = "extfeatures", .handler = handle_extfeatures },
  	{ .oid = -1 }
  };
  
-@@ -80,6 +96,7 @@ static inline void copyout_int(int value, char* to_copy, size_t* to_copy_length)
+@@ -80,6 +102,7 @@ static inline void copyout_int(int value, char* to_copy, size_t* to_copy_length)
  
  sysctl_handler(handle_vendor)
  {
@@ -4175,7 +4437,7 @@ index 4319355..12a5e20 100644
  	unsigned int level = 0;
      unsigned int eax = 0;
  	union
-@@ -96,7 +113,8 @@ sysctl_handler(handle_vendor)
+@@ -96,7 +119,8 @@ sysctl_handler(handle_vendor)
      __cpuid(level, eax, v.ebx, v.ecx, v.edx);
  
  	v.name[12] = 0;
@@ -4185,7 +4447,7 @@ index 4319355..12a5e20 100644
  
  	return 0;
  }
-@@ -108,84 +126,104 @@ sysctl_handler(handle_max_basic)
+@@ -108,206 +132,277 @@ sysctl_handler(handle_max_basic)
  
      __cpuid(level, eax, ebx, ecx, edx);
  
@@ -4272,20 +4534,13 @@ index 4319355..12a5e20 100644
 -    eax &= 15;
 -
 -    copyout_int(eax,(char*)old, oldlen);
-+	return copyout_cpu_int("machdep.cpu.stepping", identity_cpu_signature() & 0xf, old, oldlen);
-+}
- 
+-
 -    return 0;
-+sysctl_handler(handle_signature)
-+{
-+	sysctl_handle_size(sizeof(int));
-+	*((int*) old) = (int) identity_cpu_signature();
-+	return 0;
++	return copyout_cpu_int("machdep.cpu.stepping", identity_cpu_signature() & 0xf, old, oldlen);
  }
  
-+// Original cpuid-based implementation, replaced by the fixed brand string defined above
-+#if 0
- sysctl_handler(handle_brand_string)
+-sysctl_handler(handle_brand_string)
++sysctl_handler(handle_signature)
  {
 -    setup(0x80000000);
 -
@@ -4294,23 +4549,14 @@ index 4319355..12a5e20 100644
 -    if (eax < 0x80000004) // the information is not implemented
 -        return 2;
 -
-+	union
-+	{
-+		unsigned int brand[12];
-+		char name[49];
-+	} v;
-+	unsigned int eax, ebx, ecx, edx;
- 
-+	__asm__("cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "0" (0x80000000u), "2" (0));
- 
+-
+-
 -    union
 -    {
 -        unsigned int brand[12];
 -        char name[49];
 -    } v;
-+	if (eax < 0x80000004) // the information is not implemented
-+		return -ENOENT;
- 
+-
 -		for (int i = 1; i < 4; i++)
 -		{
 -				eax = 0x80000000+i;
@@ -4320,6 +4566,69 @@ index 4319355..12a5e20 100644
 -				v.brand[0x2+(i-1)*4] = ecx;
 -				v.brand[0x3+(i-1)*4] = edx;
 -		}
+-
+-    v.name[48] = 0;
+-    copyout_string(v.name, (char*) old, oldlen);
+-
+-    return 0;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = (int) identity_cpu_signature();
++	return 0;
+ }
+ 
+-sysctl_handler(handle_features)
++// Original cpuid-based implementation, replaced by the fixed brand string defined above
++#if 0
++sysctl_handler(handle_brand_string)
+ {
++	union
++	{
++		unsigned int brand[12];
++		char name[49];
++	} v;
++	unsigned int eax, ebx, ecx, edx;
+ 
+-    setup(1);
+-
+-    static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
+-                        "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
+-                        "HTT", "TM","IA64","PBE"};
+-
+-    __cpuid(0,eax,ebx,ecx,edx);
+-    int current_length = 0;
+-
+-    if (old != NULL)
+-    {
+-
+-        char *outsr = (char*)old;
+-
+-        for (int i = 0; i < 32; i++)
+-        {
+-            if (i == 10 || i == 20)
+-                continue;
+-
+-            if ( (edx & (1<<i)) && current_length < *oldlen)
+-            {
+-                if (current_length)
+-                {
+-                    outsr[current_length] = ' ';
++	__asm__("cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "0" (0x80000000u), "2" (0));
+ 
+-                    current_length++;
+-                }
+-                if (current_length < *oldlen)
+-                {
+-                    int len = __simple_strlen(features[i]);
+-                    
+-                    strncpy(outsr + current_length, features[i],
+-                    *oldlen - current_length);
++	if (eax < 0x80000004) // the information is not implemented
++		return -ENOENT;
+ 
+-                    current_length += len;
+-                }
+-            }
+-        }
 +	for (unsigned int i = 0; i < 3; i++)
 +	{
 +		__asm__("cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "0" (0x80000002u + i), "2" (0));
@@ -4329,19 +4638,146 @@ index 4319355..12a5e20 100644
 +		v.brand[i * 4 + 3] = edx;
 +	}
  
--    v.name[48] = 0;
--    copyout_string(v.name, (char*) old, oldlen);
+-        if (current_length < *oldlen)
+-        {
+-            outsr[current_length] = '\0';
+-        }
 +	v.name[48] = 0;
 +	copyout_string(v.name, (char*) old, oldlen);
  
--    return 0;
+-    }
+-    else
+-    {
 +	return 0;
- }
++}
 +#endif
  
- sysctl_handler(handle_features)
- {
-@@ -269,45 +307,66 @@ sysctl_handler(handle_features)
+-        for (int i = 0; i < 32; i++)
+-        {
++/*
++ * darling-lol: XNU's feature strings (osfmk/i386/cpuid.c), in XNU's order, from the
++ * CPUID bits this process sees. With cpu.emulate_cpuid the CPUID below is the
++ * emulated one, so the strings agree with what code executing CPUID gets.
++ * (The old handler ran leaf 0, decoding the vendor string as features.)
++ */
++enum { R_EAX, R_EBX, R_ECX, R_EDX };
++struct cpu_feature_name { unsigned char reg, bit; const char* name; };
++
++static const struct cpu_feature_name leaf1_names[] = {
++	{R_EDX, 0, "FPU"}, {R_EDX, 1, "VME"}, {R_EDX, 2, "DE"}, {R_EDX, 3, "PSE"}, {R_EDX, 4, "TSC"},
++	{R_EDX, 5, "MSR"}, {R_EDX, 6, "PAE"}, {R_EDX, 7, "MCE"}, {R_EDX, 8, "CX8"}, {R_EDX, 9, "APIC"},
++	{R_EDX, 11, "SEP"}, {R_EDX, 12, "MTRR"}, {R_EDX, 13, "PGE"}, {R_EDX, 14, "MCA"}, {R_EDX, 15, "CMOV"},
++	{R_EDX, 16, "PAT"}, {R_EDX, 17, "PSE36"}, {R_EDX, 18, "PSN"}, {R_EDX, 19, "CLFSH"}, {R_EDX, 21, "DS"},
++	{R_EDX, 22, "ACPI"}, {R_EDX, 23, "MMX"}, {R_EDX, 24, "FXSR"}, {R_EDX, 25, "SSE"}, {R_EDX, 26, "SSE2"},
++	{R_EDX, 27, "SS"}, {R_EDX, 28, "HTT"}, {R_EDX, 29, "TM"}, {R_EDX, 31, "PBE"},
++	{R_ECX, 0, "SSE3"}, {R_ECX, 1, "PCLMULQDQ"}, {R_ECX, 2, "DTES64"}, {R_ECX, 3, "MON"}, {R_ECX, 4, "DSCPL"},
++	{R_ECX, 5, "VMX"}, {R_ECX, 6, "SMX"}, {R_ECX, 7, "EST"}, {R_ECX, 8, "TM2"}, {R_ECX, 9, "SSSE3"},
++	{R_ECX, 10, "CID"}, {R_ECX, 12, "FMA"}, {R_ECX, 13, "CX16"}, {R_ECX, 14, "TPR"}, {R_ECX, 15, "PDCM"},
++	{R_ECX, 19, "SSE4.1"}, {R_ECX, 20, "SSE4.2"}, {R_ECX, 21, "x2APIC"}, {R_ECX, 22, "MOVBE"},
++	{R_ECX, 23, "POPCNT"}, {R_ECX, 25, "AES"}, {R_ECX, 17, "PCID"}, {R_ECX, 26, "XSAVE"}, {R_ECX, 27, "OSXSAVE"},
++	{R_ECX, 11, "SEGLIM64"}, {R_ECX, 24, "TSCTMR"}, {R_ECX, 28, "AVX1.0"}, {R_ECX, 30, "RDRAND"},
++	{R_ECX, 29, "F16C"}, {R_ECX, 31, "VMM"},
++};
+ 
+-            if (i == 10 || i == 20)
+-                continue;
++static const struct cpu_feature_name leaf7_names[] = {
++	{R_EBX, 0, "RDWRFSGS"}, {R_EBX, 1, "TSC_THREAD_OFFSET"}, {R_EBX, 2, "SGX"}, {R_EBX, 3, "BMI1"},
++	{R_EBX, 4, "HLE"}, {R_EBX, 5, "AVX2"}, {R_EBX, 6, "FDPEO"}, {R_EBX, 7, "SMEP"}, {R_EBX, 8, "BMI2"},
++	{R_EBX, 9, "ERMS"}, {R_EBX, 10, "INVPCID"}, {R_EBX, 11, "RTM"}, {R_EBX, 12, "PQM"}, {R_EBX, 13, "FPU_CSDS"},
++	{R_EBX, 14, "MPX"}, {R_EBX, 15, "PQE"}, {R_EBX, 16, "AVX512F"}, {R_EBX, 17, "AVX512DQ"},
++	{R_EBX, 18, "RDSEED"}, {R_EBX, 19, "ADX"}, {R_EBX, 20, "SMAP"}, {R_EBX, 21, "AVX512IFMA"},
++	{R_EBX, 23, "CLFSOPT"}, {R_EBX, 24, "CLWB"}, {R_EBX, 25, "IPT"}, {R_EBX, 28, "AVX512CD"},
++	{R_EBX, 29, "SHA"}, {R_EBX, 30, "AVX512BW"}, {R_EBX, 31, "AVX512VL"},
++	{R_ECX, 0, "PREFETCHWT1"}, {R_ECX, 1, "AVX512VBMI"}, {R_ECX, 2, "UMIP"}, {R_ECX, 3, "PKU"},
++	{R_ECX, 4, "OSPKE"}, {R_ECX, 5, "WAITPKG"}, {R_ECX, 8, "GFNI"}, {R_ECX, 9, "VAES"},
++	{R_ECX, 10, "VPCLMULQDQ"}, {R_ECX, 11, "AVX512VNNI"}, {R_ECX, 12, "AVX512BITALG"},
++	{R_ECX, 14, "AVX512VPOPCNTDQ"}, {R_ECX, 22, "RDPID"}, {R_ECX, 25, "CLDEMOTE"}, {R_ECX, 27, "MOVDIRI"},
++	{R_ECX, 28, "MOVDIR64B"}, {R_ECX, 30, "SGXLC"},
++	{R_EDX, 2, "AVX5124VNNIW"}, {R_EDX, 3, "AVX5124FMAPS"}, {R_EDX, 4, "FSREPMOV"}, {R_EDX, 9, "SRBDS_CTRL"},
++	{R_EDX, 10, "MDCLEAR"}, {R_EDX, 13, "TSXFA"}, {R_EDX, 26, "IBRS"}, {R_EDX, 27, "STIBP"},
++	{R_EDX, 28, "L1DF"}, {R_EDX, 29, "ACAPMSR"}, {R_EDX, 31, "SSBD"},
++};
+ 
+-            if (edx & (1<<i)) 
+-            {
+-                if (current_length != 0)
+-                    current_length++;
+-                
+-                current_length += __simple_strlen(features[i]);
+-            }
++/* Leaf 0x80000001, then invariant TSC (0x80000007 EDX bit 8) as TSCI, which this
++ * table marks with reg R_EAX. */
++static const struct cpu_feature_name ext_names[] = {
++	{R_EDX, 11, "SYSCALL"}, {R_EDX, 20, "XD"}, {R_EDX, 26, "1GBPAGE"}, {R_EDX, 29, "EM64T"},
++	{R_ECX, 0, "LAHF"}, {R_ECX, 5, "LZCNT"}, {R_ECX, 8, "PREFETCHW"}, {R_EDX, 27, "RDTSCP"},
++	{R_EAX, 8, "TSCI"},
++};
+ 
+-        }
++static void cpuid_regs(unsigned int leaf, unsigned int subleaf, unsigned int regs[4])
++{
++	__asm__ volatile("cpuid" : "=a"(regs[R_EAX]), "=b"(regs[R_EBX]), "=c"(regs[R_ECX]), "=d"(regs[R_EDX])
++		: "0"(leaf), "2"(subleaf));
++}
+ 
+-        if (oldlen)
+-            *oldlen = current_length;
++static long copyout_feature_names(const struct cpu_feature_name* table, unsigned int count,
++	const unsigned int regs[4], void* old, unsigned long* oldlen)
++{
++	char text[640];
++	unsigned long used = 0;
+ 
+-    }
+-        
++	text[0] = '\0';
++	for (unsigned int i = 0; i < count; i++)
++	{
++		if (!(regs[table[i].reg] & (1u << table[i].bit)))
++			continue;
++		unsigned long length = __simple_strlen(table[i].name);
++		if (used + length + 2 > sizeof(text))
++			break;
++		if (used)
++			text[used++] = ' ';
++		for (unsigned long j = 0; j < length; j++)
++			text[used++] = table[i].name[j];
++		text[used] = '\0';
++	}
++	copyout_string(text, (char*) old, oldlen);
++	return 0;
++}
+ 
++sysctl_handler(handle_features)
++{
++	unsigned int regs[4];
++	cpuid_regs(1, 0, regs);
++	return copyout_feature_names(leaf1_names, sizeof(leaf1_names) / sizeof(leaf1_names[0]), regs, old, oldlen);
++}
+ 
+-    return 0;
++static sysctl_handler(handle_leaf7_features)
++{
++	unsigned int regs[4];
++	cpuid_regs(0, 0, regs);
++	if (regs[R_EAX] < 7)
++		regs[R_EBX] = regs[R_ECX] = regs[R_EDX] = 0;
++	else
++		cpuid_regs(7, 0, regs);
++	return copyout_feature_names(leaf7_names, sizeof(leaf7_names) / sizeof(leaf7_names[0]), regs, old, oldlen);
++}
+ 
++static sysctl_handler(handle_extfeatures)
++{
++	unsigned int regs[4], power[4];
++	cpuid_regs(0x80000001, 0, regs);
++	cpuid_regs(0x80000007, 0, power);
++	regs[R_EAX] = power[R_EDX];
++	return copyout_feature_names(ext_names, sizeof(ext_names) / sizeof(ext_names[0]), regs, old, oldlen);
+ }
+ 
+ 
  // TODO: i doubt core count is ever going to change.
  //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
  sysctl_handler(handle_core_count) {
@@ -4437,7 +4873,7 @@ index 4319355..12a5e20 100644
  	}
  
  out:
-@@ -319,3 +378,21 @@ out:
+@@ -319,3 +414,21 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -6189,13 +6625,35 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..af904ed 100644
+index c2f70fb..5311014 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-@@ -83,6 +83,38 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+@@ -27,6 +27,8 @@
+ #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
++#include <darlingserver/rpc.h>
+ #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
+ 
+@@ -42,8 +44,11 @@ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+ extern char *strcpy(char *dest, const char *src);
+ extern char *strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
+ extern int strncmp (const char * str1, const char * str2, __SIZE_TYPE__ num);
++extern int strcmp(const char* str1, const char* str2);
+ extern char *strchr(char *str, int character);
+ 
++static long _proc_listpids(uint32_t type, uint32_t typeinfo, int* buffer, int32_t bufsize);
++
+ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+ 		uint64_t arg, void* buffer, int32_t bufsize)
+ {
+@@ -83,7 +88,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  		case 2: // proc_pidinfo
  			return _proc_pidinfo(pid, flavor, arg, buffer, bufsize);
  		case 3: // proc_pidfdinfo
+-		case 1: // proc_listpids
 +		{
 +			if (flavor == PROC_PIDFDVNODEPATHINFO)
 +			{
@@ -6228,9 +6686,201 @@ index c2f70fb..af904ed 100644
 +					flavor);
 +			return -ENOTSUP;
 +		}
- 		case 1: // proc_listpids
++		case 1: // proc_listpids(type, typeinfo, buffer, buffersize)
++			return _proc_listpids((uint32_t) pid, flavor, (int*) buffer, bufsize);
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
+ 					callnum);
+@@ -827,3 +865,189 @@ bail:
+ 	close_internal(fd);
+ 	return count * sizeof(uint64_t);
+ }
++
++/*
++ * darling-lol: proc_listpids (libproc's proc_listallpids, proc_listpgrppids,
++ * proc_listchildpids, ...). The processes are the ones darlingserver knows, i.e. every
++ * Mach-O process of the session, not the Linux helpers around them (bubblewrap, the
++ * lifecycle, darlingserver). With host.hide, Darling's own daemons and tools are left
++ * out as well; a Mac has none of them. Read with raw Linux system calls, below the
++ * guest view, which hides /proc from applications.
++ */
++#define LINUX_O_DIRECTORY 0200000
++#define LINUX_O_CLOEXEC 02000000
++
++static const char* const darling_process_names[] = {
++	"shellspawn", "iokitd", "darlingserver", "mldr", "darling", "vchroot", "rcspawn",
++	"launchd-helper", "xtrace",
++};
++
++static long raw_read_file(const char* path, char* buf, int size)
++{
++	long fd = LINUX_SYSCALL(__NR_open, path, LINUX_O_CLOEXEC, 0);
++	long got;
++
++	if (fd < 0)
++		return fd;
++	got = LINUX_SYSCALL(__NR_read, fd, buf, size - 1);
++	LINUX_SYSCALL(__NR_close, fd);
++	if (got < 0)
++		return got;
++	buf[got] = '\0';
++	return got;
++}
++
++/* Field (1-based) of /proc/<pid>/stat after the command name, e.g. 4 = ppid. */
++static bool stat_field(int pid, int field, long* value)
++{
++	char path[48], buf[512];
++	const char* p;
++
++	__simple_sprintf(path, "/proc/%d/stat", pid);
++	if (raw_read_file(path, buf, sizeof(buf)) <= 0)
++		return false;
++	p = buf;
++	for (const char* q = buf; *q; q++)
++		if (*q == ')')
++			p = q + 1; /* the command name may contain spaces and parentheses */
++	for (int index = 2; index < field; index++)
++	{
++		while (*p == ' ')
++			p++;
++		while (*p && *p != ' ')
++			p++;
++	}
++	while (*p == ' ')
++		p++;
++	if (!*p)
++		return false;
++	*value = 0;
++	bool negative = *p == '-';
++	if (negative)
++		p++;
++	for (; *p >= '0' && *p <= '9'; p++)
++		*value = *value * 10 + (*p - '0');
++	if (negative)
++		*value = -*value;
++	return true;
++}
++
++/* Real (index 0) or effective (index 1) uid from /proc/<pid>/status. */
++static bool status_uid(int pid, int index, long* uid)
++{
++	char path[48], buf[2048];
++	const char* p;
++
++	__simple_sprintf(path, "/proc/%d/status", pid);
++	if (raw_read_file(path, buf, sizeof(buf)) <= 0)
++		return false;
++	for (p = buf; *p; p++)
++	{
++		if ((p == buf || p[-1] == '\n') && strncmp(p, "Uid:", 4) == 0)
++			break;
++	}
++	if (!*p)
++		return false;
++	p += 4;
++	for (int i = 0; i <= index; i++)
++	{
++		while (*p == ' ' || *p == '\t')
++			p++;
++		*uid = 0;
++		if (*p < '0' || *p > '9')
++			return false;
++		for (; *p >= '0' && *p <= '9'; p++)
++			*uid = *uid * 10 + (*p - '0');
++	}
++	return true;
++}
++
++static bool listed_process(int pid, uint32_t type, uint32_t typeinfo)
++{
++	struct vchroot_unexpand_args exe;
++	uint64_t length;
++	long value;
++
++	if (dserver_rpc_get_executable_path(pid, exe.path, sizeof(exe.path), &length) != 0)
++		return false;
++	if (darling_guest_view_active())
++	{
++		const char* name = exe.path;
++		if (vchroot_unexpand(&exe) != 0)
++			return false;
++		if (strncmp(exe.path, "/usr/libexec/darling/", 21) == 0)
++			return false;
++		for (const char* q = exe.path; *q; q++)
++			if (*q == '/')
++				name = q + 1;
++		for (size_t i = 0; i < sizeof(darling_process_names) / sizeof(darling_process_names[0]); i++)
++			if (strcmp(name, darling_process_names[i]) == 0)
++				return false;
++	}
++	switch (type)
++	{
++		case PROC_ALL_PIDS:
++			return true;
++		case PROC_PGRP_ONLY:
++			value = LINUX_SYSCALL(__NR_getpgid, pid);
++			return value >= 0 && (uint32_t) value == typeinfo;
++		case PROC_PPID_ONLY:
++			return stat_field(pid, 4, &value) && (uint32_t) value == typeinfo;
++		case PROC_UID_ONLY:
++			return status_uid(pid, 1, &value) && (uint32_t) value == typeinfo;
++		case PROC_RUID_ONLY:
++			return status_uid(pid, 0, &value) && (uint32_t) value == typeinfo;
++		default: /* PROC_TTY_ONLY, PROC_KDBG_ONLY */
++			return false;
++	}
++}
++
++static long _proc_listpids(uint32_t type, uint32_t typeinfo, int* buffer, int32_t bufsize)
++{
++	struct linux_dirent64
++	{
++		uint64_t d_ino;
++		int64_t d_off;
++		unsigned short d_reclen;
++		unsigned char d_type;
++		char d_name[];
++	};
++	char dents[4096];
++	long fd, got;
++	int count = 0, stored = 0;
++
++	if (type < PROC_ALL_PIDS || type > PROC_PPID_ONLY)
++		return -EINVAL;
++	if (buffer != NULL && bufsize < 0)
++		return -EINVAL;
++	fd = LINUX_SYSCALL(__NR_open, "/proc", LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
++	if (fd < 0)
++		return errno_linux_to_bsd(fd);
++	while ((got = LINUX_SYSCALL(__NR_getdents64, fd, dents, sizeof(dents))) > 0)
++	{
++		for (long pos = 0; pos < got;)
++		{
++			struct linux_dirent64* dent = (struct linux_dirent64*) (dents + pos);
++			int pid = 0;
++			const char* c = dent->d_name;
++
++			pos += dent->d_reclen;
++			if (*c < '1' || *c > '9')
++				continue;
++			for (; *c >= '0' && *c <= '9'; c++)
++				pid = pid * 10 + (*c - '0');
++			if (*c || !listed_process(pid, type, typeinfo))
++				continue;
++			count++;
++			if (buffer != NULL && (stored + 1) * (int32_t) sizeof(int) <= bufsize)
++				buffer[stored++] = pid;
++		}
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++	if (got < 0)
++		return errno_linux_to_bsd(got);
++	/* As XNU: a size query gets room for a few more processes. */
++	if (buffer == NULL)
++		return (count + 20) * (long) sizeof(int);
++	return stored * (long) sizeof(int);
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c

@@ -73,6 +73,34 @@ mkdir -p "$WORKSPACE/usr-local"
 cd "$WORKSPACE"
 # Map subordinate IDs before bubblewrap sets no_new_privs. UID 0 is not host root.
 fhs_command=("$UNSHARE_BIN" --user --map-auto --map-current-user --setuid=0 --setgid=0 "$FHS_BIN")
+# RCLOL_NETNS_HOOK=<program>: run the session and --shell in their own network
+# namespace, owned by Darling's user namespace. Before Darling starts, the program
+# runs on the host with the PID of a process in that namespace and must give it its
+# network (for example pasta, plus routes); if it fails, nothing starts. Used to
+# audit what the client sends (league-linux scripts/telemetry-audit.sh).
+netns_ready=
+if [ -n "${RCLOL_NETNS_HOOK:-}" ]; then
+  netns_ready="$WORKSPACE/.netns-ready"
+  rm -f "$netns_ready"
+  mkfifo -m 600 "$netns_ready"
+  fhs_command=("$UNSHARE_BIN" --user --map-auto --map-current-user --setuid=0 --setgid=0 --net
+    sh -c 'IFS= read -r state < "$0"; rm -f "$0"
+           [ "$state" = ready ] && exec "$@"
+           echo "darling-lol: the network namespace hook failed" >&2; exit 1' "$netns_ready" "$FHS_BIN")
+fi
+# Give the new network namespace of process $1 its network, then let it continue.
+netns_setup() {
+  [ -n "$netns_ready" ] || return 0
+  local pid=$1 state=failed
+  while kill -0 "$pid" 2>/dev/null &&
+        [ "$(readlink "/proc/$pid/ns/net" 2>/dev/null)" = "$(readlink /proc/$$/ns/net)" ]; do
+    sleep 0.05
+  done
+  if kill -0 "$pid" 2>/dev/null && "$RCLOL_NETNS_HOOK" "$pid"; then
+    state=ready
+  fi
+  timeout 10 sh -c 'echo "$1" > "$0"' "$netns_ready" "$state" || rm -f "$netns_ready"
+}
 stop_request="$WORKSPACE/.stop-request"
 rm -f "$stop_request"
 # Ctrl+C, a closed terminal or SIGTERM must reach nix-lifecycle.py, which shuts
@@ -84,6 +112,7 @@ session() {
   (trap '' INT QUIT HUP TERM
    exec "${fhs_command[@]}" env --default-signal=INT,QUIT,HUP,TERM bash ./scripts/nix-session.sh "$@") 0<&0 &
   local pid=$! status
+  netns_setup "$pid"
   trap 'touch "$stop_request"' INT HUP TERM
   while :; do
     wait "$pid" && status=0 || status=$?
@@ -96,7 +125,15 @@ session() {
 # Keep this supervisor alive to hold the lock: bubblewrap may close extra FDs.
 # It never owns or signals game processes.
 case "${1:-}" in
-  --shell) shift; "${fhs_command[@]}" bash "$@";;
+  --shell) shift
+    if [ -n "$netns_ready" ]; then
+      "${fhs_command[@]}" bash "$@" 0<&0 &
+      pid=$!
+      netns_setup "$pid"
+      wait "$pid"
+    else
+      "${fhs_command[@]}" bash "$@"
+    fi;;
   --update) shift; "${fhs_command[@]}" ./scripts/update.sh "$@";;
   # In the namespace, whose root owns the prefix files, so a copy keeps owners.
   --set-prefix) "${fhs_command[@]}" python3 ./scripts/nix-prefix.py "$2";;

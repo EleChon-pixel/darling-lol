@@ -106,6 +106,12 @@ class ProvisioningChecks(unittest.TestCase):
             'home.isolated': '1',
             'host.hide': '1',
             'cpu.emulate_cpuid': '1',
+            'hw.l1icachesize': '32768',
+            'hw.l1dcachesize': '32768',
+            'hw.l2cachesize': '262144',
+            'hw.l3cachesize': '12582912',
+            'cpu.cpuid_max_leaf': '0x16',
+            'kern.uuid': 'C1F19971-4298-505F-8B42-FD09528F7BF0',
         })
         version = plistlib.loads((self.prefix /
             'System/Library/CoreServices/SystemVersion.plist').read_bytes())
