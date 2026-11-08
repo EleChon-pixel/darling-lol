@@ -3064,10 +3064,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..9a9f1f0
+index 0000000..59e9a65
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,673 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3252,6 +3252,16 @@ index 0000000..9a9f1f0
 +	{
 +		const char* at = p;
 +		n = next_component(&at);
++		/* Darling's frameworks keep private records in /dev/shm/darling-* (CoreVideo's
++		 * display link and frame sink, OpenGL's present targets) and open them from
++		 * inside the application; /dev/shm itself stays hidden. */
++		if (n == 3 && strncmp(at, "shm", 3) == 0)
++		{
++			const char* record = at + 3;
++			size_t length = next_component(&record);
++			if (length > 0 && darling_file_name(record))
++				return false;
++		}
 +		return n > 0 && !dev_name_visible(at, n, true);
 +	}
 +	{
@@ -6629,7 +6639,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..5311014 100644
+index c2f70fb..17fcaf0 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -27,6 +27,8 @@
@@ -6641,7 +6651,7 @@ index c2f70fb..5311014 100644
  #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
  
-@@ -42,8 +44,11 @@ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+@@ -42,8 +44,12 @@ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
  extern char *strcpy(char *dest, const char *src);
  extern char *strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
  extern int strncmp (const char * str1, const char * str2, __SIZE_TYPE__ num);
@@ -6649,11 +6659,12 @@ index c2f70fb..5311014 100644
  extern char *strchr(char *str, int character);
  
 +static long _proc_listpids(uint32_t type, uint32_t typeinfo, int* buffer, int32_t bufsize);
++bool darling_process_name(int pid, char* name, size_t size);
 +
  long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  		uint64_t arg, void* buffer, int32_t bufsize)
  {
-@@ -83,7 +88,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+@@ -83,7 +89,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  		case 2: // proc_pidinfo
  			return _proc_pidinfo(pid, flavor, arg, buffer, bufsize);
  		case 3: // proc_pidfdinfo
@@ -6695,7 +6706,29 @@ index c2f70fb..5311014 100644
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
  					callnum);
-@@ -827,3 +865,189 @@ bail:
+@@ -328,6 +367,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	info->pbi_start_tvusec = starttime_usecs;
+ 
+ 	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
++	if (!darling_process_name(pid, info->pbi_name, sizeof(info->pbi_name)))
++		memcpy(info->pbi_name, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
+ 
+ 	return sizeof(struct proc_bsdinfo);
+ reterr:
+@@ -388,9 +429,10 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+ 
+ #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto reterr
+ 
+-	// comm
++	// comm: the executable's name, as XNU keeps it; Linux's is mldr's
+ 	READELEM();
+-	strncpy(info->pbsi_comm, elem, sizeof(info->pbsi_comm));
++	if (!darling_process_name(pid, info->pbsi_comm, sizeof(info->pbsi_comm)))
++		strncpy(info->pbsi_comm, elem, sizeof(info->pbsi_comm) - 1);
+ 
+ 	// process state
+ 	READELEM();
+@@ -827,3 +869,217 @@ bail:
  	close_internal(fd);
  	return count * sizeof(uint64_t);
  }
@@ -6884,6 +6917,34 @@ index c2f70fb..5311014 100644
 +	if (buffer == NULL)
 +		return (count + 20) * (long) sizeof(int);
 +	return stored * (long) sizeof(int);
++}
++
++/*
++ * darling-lol: a Darling process's name as XNU reports it (p_comm, pbi_name): the last
++ * component of its executable, at most size - 1 bytes. Linux's comm for every Darling
++ * process is the loader's ("mldr"). False for processes darlingserver does not know.
++ */
++bool darling_process_name(int pid, char* name, size_t size)
++{
++	struct vchroot_unexpand_args exe;
++	uint64_t length;
++	const char* base;
++	size_t n = 0;
++
++	if (size == 0 || dserver_rpc_get_executable_path(pid, exe.path, sizeof(exe.path), &length) != 0)
++		return false;
++	if (vchroot_unexpand(&exe) != 0)
++		return false;
++	base = exe.path;
++	for (const char* q = exe.path; *q; q++)
++		if (*q == '/' && q[1])
++			base = q + 1;
++	for (; base[n] && base[n] != '/' && n < size - 1; n++)
++		name[n] = base[n];
++	if (n == 0)
++		return false;
++	name[n] = '\0';
++	return true;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
@@ -10797,3 +10858,26 @@ index 0000000..f185f6c
 +__sysctlbyname:
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
+index 6600da7..ee10fb4 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
+@@ -31,6 +31,7 @@ struct kinfo_proc_chain
+ 
+ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag);
+ static void free_chain(struct kinfo_proc_chain* chain);
++extern bool darling_process_name(int pid, char* name, __SIZE_TYPE__ size);
+ 
+ extern void free(void* ptr);
+ extern void* malloc(__SIZE_TYPE__ len);
+@@ -215,7 +216,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+ 
+ 	// comm
+ 	READELEM();
+-	strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
++	if (!darling_process_name(kinfo->kinfo.kp_proc.p_pid, kinfo->kinfo.kp_proc.p_comm,
++			sizeof(kinfo->kinfo.kp_proc.p_comm)))
++		strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm) - 1);
+ 
+ 	// process state
+ 	READELEM();
