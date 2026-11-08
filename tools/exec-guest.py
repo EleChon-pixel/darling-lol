@@ -8,6 +8,7 @@ shell, terminal or service manager exported stays on the host. RCLOL_FILTER_HOST
 passes the host environment through unchanged; RCLOL_KEEP_HOST_ENV lists names to keep
 anyway, separated by spaces or commas.
 """
+import hashlib
 import os
 import sys
 
@@ -34,6 +35,32 @@ HOST_LIBRARY_PREFIXES = (
 )
 GUEST_SHELL = '/bin/zsh'
 GUEST_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+BASE36 = '0123456789abcdefghijklmnopqrstuvwxyz'
+
+
+def mac_temp_dir(environ):
+    """The per-user temporary directory a Mac session has, /var/folders/xx/<id>/T/.
+
+    The name is stable per prefix and user (as dirhelper's is per account). The
+    directory (and its C/ sibling) is created in the prefix; None without a prefix.
+    """
+    prefix = environ.get('DPREFIX')
+    if not prefix:
+        return None
+    digest = hashlib.sha256(('%s\0%s' % (os.path.realpath(prefix), environ.get('USER', ''))).encode()).digest()
+    number = int.from_bytes(digest, 'big')
+    letters = []
+    for _ in range(24):
+        number, digit = divmod(number, 36)
+        letters.append(BASE36[digit])
+    bucket, account = ''.join(letters[:2]), ''.join(letters[2:]) + '0000gn'
+    guest = '/var/folders/%s/%s/' % (bucket, account)
+    try:
+        for leaf in ('T', 'C'):
+            os.makedirs(os.path.join(prefix, 'var/folders', bucket, account, leaf), mode=0o700, exist_ok=True)
+    except OSError:
+        return None
+    return guest + 'T/'
 
 
 def allowed_variable(name):
@@ -54,6 +81,11 @@ def filter_host_environment(environ):
     # A host PATH names Linux directories; the guest always has the Mac layout.
     if 'PATH' not in keep:
         environ['PATH'] = GUEST_PATH
+    # A Mac session's TMPDIR is its per-user /var/folders directory, not /tmp.
+    if 'TMPDIR' not in keep:
+        temporary = mac_temp_dir(environ)
+        if temporary:
+            environ['TMPDIR'] = temporary
     return removed
 
 
