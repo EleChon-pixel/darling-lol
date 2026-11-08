@@ -54,6 +54,198 @@ index e3657a19..26b8838a 100644
  }
  
  
+diff --git a/OSX/libsecurity_keychain/lib/TrustSettings.cpp b/OSX/libsecurity_keychain/lib/TrustSettings.cpp
+index c834712..40ec6e1 100644
+--- a/OSX/libsecurity_keychain/lib/TrustSettings.cpp
++++ b/OSX/libsecurity_keychain/lib/TrustSettings.cpp
+@@ -563,7 +563,20 @@ void TrustSettings::flushToDisk()
+ 	if(ortn) {
+ 		trustSettingsDbg("flushToDisk, domain %d: AuthorizationCreate returned %ld",
+ 			(int)mDomain, (long)ortn);
++#ifdef DARLING
++		/* darling-lol: Darling has no authd. Without ocspd either, ocspdTrustSettingsWrite
++		 * writes the admin settings itself and needs no authorization; an ocspd, if one
++		 * ever runs, refuses the empty blob. */
++		CSSM_DATA noAuth = {0, NULL};
++		ortn = ocspdTrustSettingsWrite(mDomain, noAuth, cssmXmlData);
++		if(ortn) {
++			MacOSError::throwMe(ortn);
++		}
++		mDirty = false;
++		return;
++#else
+ 		MacOSError::throwMe(errSecInternalComponent);
++#endif
+ 	}
+ 	AuthorizationExternalForm authExt;
+ 	CSSM_DATA authBlob = {sizeof(authExt), (uint8 *)&authExt};
+diff --git a/OSX/libsecurity_ocspd/client/ocspdClient.cpp b/OSX/libsecurity_ocspd/client/ocspdClient.cpp
+index 060deb2..60373b5 100644
+--- a/OSX/libsecurity_ocspd/client/ocspdClient.cpp
++++ b/OSX/libsecurity_ocspd/client/ocspdClient.cpp
+@@ -383,8 +383,115 @@ CSSM_RETURN ocspdCRLFlush(
+ 	return CSSM_OK;
+ }
+ 
++#ifdef DARLING
+ /*
+- * Obtain TrustSettings. 
++ * darling-lol: Darling has no ocspd, the daemon that reads and writes Trust Settings
++ * for its clients. Without it, the admin settings (the file `security add-trusted-cert -d`
++ * and Keychain Access maintain, and that Chromium's TrustStoreMac consults for locally
++ * trusted roots) are read and written here directly. There are no per-user settings.
++ */
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#define DC_TRUST_SETTINGS_DIR	"/Library/Security/Trust Settings"
++#define DC_ADMIN_TRUST_SETTINGS	DC_TRUST_SETTINGS_DIR "/Admin.plist"
++#define DC_TRUST_SETTINGS_MAX	(16 * 1024 * 1024)
++
++static OSStatus dcTrustSettingsRead(
++	Allocator				&alloc,
++	SecTrustSettingsDomain	domain,
++	CSSM_DATA				&trustSettings)
++{
++	if(domain != kSecTrustSettingsDomainAdmin) {
++		return errSecNoTrustSettings;
++	}
++	int fd = open(DC_ADMIN_TRUST_SETTINGS, O_RDONLY | O_CLOEXEC);
++	if(fd < 0) {
++		return errSecNoTrustSettings;
++	}
++	struct stat sb;
++	if(fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_size <= 0 ||
++	   sb.st_size > DC_TRUST_SETTINGS_MAX) {
++		close(fd);
++		return errSecNoTrustSettings;
++	}
++	size_t length = (size_t)sb.st_size;
++	size_t done = 0;
++	uint8 *data = (uint8 *)alloc.malloc(length);
++	while(done < length) {
++		ssize_t got = read(fd, data + done, length - done);
++		if(got < 0 && errno == EINTR) {
++			continue;
++		}
++		if(got <= 0) {
++			break;
++		}
++		done += (size_t)got;
++	}
++	close(fd);
++	if(done != length) {
++		alloc.free(data);
++		return errSecNoTrustSettings;
++	}
++	trustSettings.Data = data;
++	trustSettings.Length = length;
++	return errSecSuccess;
++}
++
++static OSStatus dcTrustSettingsWrite(
++	SecTrustSettingsDomain	domain,
++	const CSSM_DATA			&trustSettings)
++{
++	if(domain != kSecTrustSettingsDomainAdmin) {
++		return errSecInternalComponent;
++	}
++	if(trustSettings.Length == 0) {
++		/* an empty record deletes the settings, as with ocspd */
++		if(unlink(DC_ADMIN_TRUST_SETTINGS) != 0 && errno != ENOENT) {
++			return errSecIO;
++		}
++		return errSecSuccess;
++	}
++	if(trustSettings.Length > DC_TRUST_SETTINGS_MAX) {
++		return errSecParam;
++	}
++	if((mkdir("/Library/Security", 0755) != 0 && errno != EEXIST) ||
++	   (mkdir(DC_TRUST_SETTINGS_DIR, 0755) != 0 && errno != EEXIST)) {
++		return errSecIO;
++	}
++	/* write a sibling and rename it over, so readers never see a partial file */
++	char temporary[] = DC_TRUST_SETTINGS_DIR "/.Admin.plist.XXXXXX";
++	int fd = mkstemp(temporary);
++	if(fd < 0) {
++		return errSecIO;
++	}
++	size_t done = 0;
++	while(done < trustSettings.Length) {
++		ssize_t put = write(fd, trustSettings.Data + done, trustSettings.Length - done);
++		if(put < 0 && errno == EINTR) {
++			continue;
++		}
++		if(put <= 0) {
++			break;
++		}
++		done += (size_t)put;
++	}
++	bool ok = done == trustSettings.Length && fchmod(fd, 0644) == 0 && fsync(fd) == 0;
++	ok = close(fd) == 0 && ok;
++	if(!ok || rename(temporary, DC_ADMIN_TRUST_SETTINGS) != 0) {
++		unlink(temporary);
++		return errSecIO;
++	}
++	return errSecSuccess;
++}
++#endif
++
++/*
++ * Obtain TrustSettings.
+  */
+ OSStatus ocspdTrustSettingsRead(
+ 	Allocator				&alloc,
+@@ -402,7 +509,11 @@ OSStatus ocspdTrustSettingsRead(
+ 	} 
+ 	catch(...) {
+ 		ocspdErrorLog("ocspdTrustSettingsRead: OCSPD server error\n");
++#ifdef DARLING
++		return dcTrustSettingsRead(alloc, domain, trustSettings);
++#else
+ 		return errSecInternalComponent;
++#endif
+ 	}
+ 	
+ 	krtn = ocsp_client_trustSettingsRead(serverPort, domain,
+@@ -411,6 +522,10 @@ OSStatus ocspdTrustSettingsRead(
+         if (krtn == MACH_SEND_INVALID_DEST)
+             OcspdGlobals().resetServerPort();
+ 		ocspdErrorLog("ocspdTrustSettingsRead: RPC returned %d\n", krtn);
++#ifdef DARLING
++		if (krtn == MACH_SEND_INVALID_DEST)
++			return dcTrustSettingsRead(alloc, domain, trustSettings);
++#endif
+ 		return errSecNotAvailable;
+ 	}
+ 	if(ortn) {
+@@ -447,7 +562,11 @@ OSStatus ocspdTrustSettingsWrite(
+ 	} 
+ 	catch(...) {
+ 		ocspdErrorLog("ocspdTrustSettingsWrite: OCSPD server error\n");
++#ifdef DARLING
++		return dcTrustSettingsWrite(domain, trustSettings);
++#else
+ 		return errSecInternalComponent;
++#endif
+ 	}
+ 
+ 	krtn = ocsp_client_trustSettingsWrite(serverPort, clientPort, domain,
+@@ -458,6 +577,10 @@ OSStatus ocspdTrustSettingsWrite(
+         if (krtn == MACH_SEND_INVALID_DEST)
+             OcspdGlobals().resetServerPort();
+ 		ocspdErrorLog("ocspdTrustSettingsWrite: RPC returned %d\n", krtn);
++#ifdef DARLING
++		if (krtn == MACH_SEND_INVALID_DEST)
++			return dcTrustSettingsWrite(domain, trustSettings);
++#endif
+ 		return errSecInternalComponent;
+ 	}
+ 	return ortn;
 diff --git a/OSX/sec/Security/SecExports.exp-in b/OSX/sec/Security/SecExports.exp-in
 index 116367d..c022218 100644
 --- a/OSX/sec/Security/SecExports.exp-in
