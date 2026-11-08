@@ -1149,10 +1149,10 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..8af1b01 100644
+index f58184a..d2a73a6 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
-@@ -2,14 +2,36 @@
+@@ -2,14 +2,37 @@
  // SPDX-License-Identifier: MPL-2.0
  
  #import <Metal/MTLDeviceInternal.h>
@@ -1170,6 +1170,7 @@ index f58184a..8af1b01 100644
  #import <Metal/stubs.h>
 +#import <Metal/MTLExceptionBridge.h>
 +#import <Metal/MTLTrace.h>
++#include <dlfcn.h>
 +#include <cstdio>
 +#include <cstring>
 +#include <string>
@@ -1189,7 +1190,7 @@ index f58184a..8af1b01 100644
  
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceRemovalRequestedNotification = @"MTLDeviceRemovalRequested";
-@@ -88,6 +110,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -88,6 +111,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[observer release];
  };
  
@@ -1227,7 +1228,7 @@ index f58184a..8af1b01 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -96,6 +149,10 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -96,6 +150,10 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	NSThread* _pollingThread;
  	NSCondition* _threadExitCondition;
  	BOOL _threadIsRunning;
@@ -1238,7 +1239,7 @@ index f58184a..8af1b01 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +173,79 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +174,98 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1266,19 +1267,38 @@ index f58184a..8af1b01 100644
 +	static std::string configuredIntegrated, configuredDiscrete;
 +	static const bool configured = [] {
 +		bool any = false;
-+		if (FILE* file = fopen("/private/etc/darling-runtime-identity.conf", "r")) {
-+			char line[512];
-+			while (fgets(line, sizeof(line), file)) {
-+				line[strcspn(line, "\r\n")] = '\0';
-+				if (strncmp(line, "gpu.integrated.name=", 20) == 0 && line[20]) {
-+					configuredIntegrated = line + 20;
-+					any = true;
-+				} else if (strncmp(line, "gpu.discrete.name=", 18) == 0 && line[18]) {
-+					configuredDiscrete = line + 18;
-+					any = true;
-+				}
-+			}
++		// libsystem_kernel reads the file below the BSD layer: applications' own lookups
++		// of Darling's identity files are hidden (guest_view.c). Older runtimes lack the
++		// export and still allow the plain read.
++		std::string text;
++		using IdentityLoad = bool (*)(char*, int);
++		if (auto load = reinterpret_cast<IdentityLoad>(dlsym(RTLD_DEFAULT, "__darling_identity_load"))) {
++			char data[1024];
++			if (load(data, sizeof(data)))
++				text = data;
++		} else if (FILE* file = fopen("/private/etc/darling-runtime-identity.conf", "r")) {
++			char chunk[512];
++			size_t count;
++			while ((count = fread(chunk, 1, sizeof(chunk), file)) > 0)
++				text.append(chunk, count);
 +			fclose(file);
++		}
++		size_t start = 0;
++		while (start < text.size()) {
++			size_t end = text.find('\n', start);
++			if (end == std::string::npos)
++				end = text.size();
++			std::string line = text.substr(start, end - start);
++			if (!line.empty() && line.back() == '\r')
++				line.pop_back();
++			if (line.compare(0, 20, "gpu.integrated.name=") == 0 && line.size() > 20) {
++				configuredIntegrated = line.substr(20);
++				any = true;
++			} else if (line.compare(0, 18, "gpu.discrete.name=") == 0 && line.size() > 18) {
++				configuredDiscrete = line.substr(18);
++				any = true;
++			}
++			start = end + 1;
 +		}
 +		return any;
 +	}();
@@ -1318,7 +1338,7 @@ index f58184a..8af1b01 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +253,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +273,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1326,7 +1346,7 @@ index f58184a..8af1b01 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +264,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +284,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1334,7 +1354,7 @@ index f58184a..8af1b01 100644
  
  	[super dealloc];
  }
-@@ -153,12 +285,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +305,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1444,7 +1464,7 @@ index f58184a..8af1b01 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +394,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +414,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1452,7 +1472,7 @@ index f58184a..8af1b01 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +412,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +432,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1467,7 +1487,7 @@ index f58184a..8af1b01 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +426,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +446,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1513,7 +1533,7 @@ index f58184a..8af1b01 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +471,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +491,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1633,7 +1653,7 @@ index f58184a..8af1b01 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +652,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +672,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
