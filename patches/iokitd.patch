@@ -1126,9 +1126,10 @@ new file mode 100644
 +#endif
 diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
 new file mode 100644
+index 0000000..23a8f9f
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,106 @@
 +#include "IOPlatformExpertDevice.h"
 +#include "PlatformIdentity.h"
 +#import <Foundation/NSString.h>
@@ -1196,6 +1197,8 @@ new file mode 100644
 +		@"model": dataForString(@"MacBookPro16,1"),
 +		@"product-name": dataForString(@"MacBookPro16,1"),
 +		@"board-id": dataForString(@"Mac-E1008331FDC96864"),
++		// T2 Macs name their board configuration here (ioreg: target-type).
++		@"target-type": dataForString(@"J152f"),
 +	}];
 +
 +	static NSString* uuid;
@@ -3623,7 +3626,7 @@ index 90155ed..0db159b 100644
  
 diff --git a/src/PlatformIdentity.h b/src/PlatformIdentity.h
 new file mode 100644
-index 0000000..6c87959
+index 0000000..4ebfacd
 --- /dev/null
 +++ b/src/PlatformIdentity.h
 @@ -0,0 +1,81 @@
@@ -3679,7 +3682,7 @@ index 0000000..6c87959
 +            if (!printable(value, 64)) return nil;
 +            result[key] = value;
 +        } else if ([key isEqual:@"manufacturer"] || [key isEqual:@"model"] || [key isEqual:@"product-name"] ||
-+                   [key isEqual:@"board-id"] || [key isEqual:@"mlb-serial-number"]) {
++                   [key isEqual:@"board-id"] || [key isEqual:@"mlb-serial-number"] || [key isEqual:@"target-type"]) {
 +            if (!printable(value, [key isEqual:@"mlb-serial-number"] ? 64 : 128)) return nil;
 +            const char* text = [value UTF8String];
 +            result[key] = [NSData dataWithBytes:text length:strlen(text)+1];

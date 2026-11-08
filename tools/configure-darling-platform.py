@@ -8,6 +8,7 @@ from contextlib import nullcontext
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import shlex
 import tempfile
 import uuid
@@ -34,6 +35,9 @@ HARDWARE_PROFILES = {
         # L1I, L1D, L2 (per core), L3 (shared) in bytes; CPUID leaf 4 and hw.l*cachesize.
         'caches': (32768, 32768, 262144, 16777216),
         'cpuid_max_leaf': 0x16,
+        # IOPlatformExpertDevice board-id and target-type (the T2 board configuration).
+        'board_id': 'Mac-E1008331FDC96864',
+        'target_type': 'J152f',
         'hostname': 'MacBook-Pro.local',
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
         'gpu_discrete': ('AMD Radeon Pro 5500M', 0x1002, 0x7340),
@@ -55,6 +59,8 @@ HARDWARE_PROFILES = {
         'threads_per_core': 2,
         'caches': (32768, 32768, 262144, 12582912),
         'cpuid_max_leaf': 0x16,
+        'board_id': 'Mac-CFF7D910A743CAAF',
+        'target_type': 'J185',
         'hostname': 'iMac.local',
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x9BC8),
         'gpu_discrete': ('AMD Radeon Pro 5300', 0x1002, 0x7340),
@@ -99,12 +105,13 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'cpu.cpuid_max_leaf', 'kern.uuid')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
-           'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
+           'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
 BYTES = {'ROM': 6, 'system-id': 16}
 ALIASES = {
     'SystemProductName': 'model', 'Type': 'model', 'SMBIOS_MODEL': 'model',
     'SMBIOS_PRODUCT_NAME': 'product-name', 'SMBIOS_MANUFACTURER': 'manufacturer',
-    'SMBIOS_BOARD_ID': 'board-id', 'SystemSerialNumber': 'IOPlatformSerialNumber',
+    'SMBIOS_BOARD_ID': 'board-id', 'SMBIOS_TARGET_TYPE': 'target-type',
+    'SystemSerialNumber': 'IOPlatformSerialNumber',
     'Serial': 'IOPlatformSerialNumber', 'SMBIOS_SERIAL_NUMBER': 'IOPlatformSerialNumber',
     'SystemUUID': 'IOPlatformUUID', 'SmUUID': 'IOPlatformUUID', 'SMBIOS_PLATFORM_UUID': 'IOPlatformUUID',
     'MLB': 'mlb-serial-number', 'Board Serial': 'mlb-serial-number', 'SMBIOS_MLB': 'mlb-serial-number',
@@ -114,7 +121,7 @@ ALIASES = {
 
 
 def validate(properties):
-    if not isinstance(properties, dict) or len(properties) > 10:
+    if not isinstance(properties, dict) or len(properties) > 12:
         raise ValueError('properties must be a dictionary of supported identity fields')
     result = {}
     for key, value in properties.items():
@@ -460,7 +467,48 @@ def save_provisioning(prefix, properties, runtime_root, hardware_profile=None,
     changed = False
     for relative in order:
         changed = atomic_write(checked_path(prefix, relative), files[relative]) or changed
+    for relative, data in mac_account_files(prefix).items():
+        changed = atomic_write(checked_path(prefix, relative), data) or changed
     return changed
+
+
+def mac_account_full_name(login):
+    """The account's full name as a Mac shows it: the host's first GECOS field, else the login."""
+    try:
+        gecos = pwd.getpwnam(login).pw_gecos
+    except KeyError:
+        gecos = ''
+    name = gecos.split(',', 1)[0].strip()
+    if not name or any(not 32 <= ord(c) <= 126 or c == ':' for c in name):
+        name = login
+    return name
+
+
+def mac_account_files(prefix):
+    """passwd/master.passwd with Darling's generated user records made Mac-like.
+
+    Darling writes the user as "Darling User" with /bin/bash; a Mac account carries the
+    person's full name and zsh. Only lines Darling generated are changed.
+    """
+    result = {}
+    for relative, gecos_field in (('private/etc/passwd', 4), ('private/etc/master.passwd', 7)):
+        path = checked_path(prefix, relative)
+        if not path.exists():
+            continue
+        text = path.read_text()
+        lines = []
+        for line in text.split('\n'):
+            fields = line.split(':')
+            if (len(fields) > gecos_field + 2 and fields[gecos_field] == 'Darling User'
+                    and fields[-1] == '/bin/bash' and fields[0] != 'root'):
+                fields[gecos_field] = mac_account_full_name(fields[0])
+                fields[-1] = '/bin/zsh'
+                line = ':'.join(fields)
+            lines.append(line)
+        updated = '\n'.join(lines)
+        if updated != text:
+            result[relative] = updated.encode()
+    return result
 
 
 def prefix_lock(prefix):
@@ -549,6 +597,8 @@ def main(argv=None):
                 properties['model'] = hardware['model']
                 properties['product-name'] = hardware['model']
                 properties['manufacturer'] = hardware['manufacturer']
+                properties['board-id'] = hardware['board_id']
+                properties['target-type'] = hardware['target_type']
             for assignment in args.set:
                 key, sep, value = assignment.partition('=')
                 if not sep:

@@ -13735,7 +13735,7 @@ index 0000000..04d64c1
 +}
 +#endif
 diff --git a/src/startup/darling.c b/src/startup/darling.c
-index a3f27fbf..68ef1c07 100644
+index a3f27fbf..a61db107 100644
 --- a/src/startup/darling.c
 +++ b/src/startup/darling.c
 @@ -220,9 +220,7 @@ int main(int argc, char ** argv)
@@ -13788,6 +13788,55 @@ index a3f27fbf..68ef1c07 100644
  }
  
  void setupIDs(int sockfd)
+@@ -1026,6 +1050,22 @@ void setupPrefix()
+ 		exit(1);
+ 	}
+ 
++	/* darling-lol: like a Mac account, the user record carries the person's full name
++	 * (the first GECOS field, else the login name) and zsh, macOS's login shell. */
++	char full_name[128];
++	{
++		const char* gecos = passwd_entry->pw_gecos;
++		size_t n = 0;
++		while (gecos && gecos[n] && gecos[n] != ',' && gecos[n] != ':' && gecos[n] != '\n' && n < sizeof(full_name) - 1)
++		{
++			full_name[n] = gecos[n];
++			n++;
++		}
++		full_name[n] = '\0';
++		if (n == 0)
++			snprintf(full_name, sizeof(full_name), "%s", passwd_entry->pw_name);
++	}
++
+ 	path[plen] = '\0';
+ 	strcat(path, "/private/etc/passwd");
+ 	file = fopen(path, "w");
+@@ -1036,10 +1076,11 @@ void setupPrefix()
+ 
+ 	fprintf(file,
+ 		"root:*:0:0:System Administrator:/var/root:/bin/sh\n"
+-		"%s:*:%d:%d:Darling User:/Users/%s:/bin/bash\n",
++		"%s:*:%d:%d:%s:/Users/%s:/bin/zsh\n",
+ 		passwd_entry->pw_name,
+ 		passwd_entry->pw_uid,
+ 		passwd_entry->pw_gid,
++		full_name,
+ 		passwd_entry->pw_name
+ 	);
+ 	fclose(file);
+@@ -1054,10 +1095,11 @@ void setupPrefix()
+ 
+ 	fprintf(file,
+ 		"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"
+-		"%s:*:%d:%d::0:0:Darling User:/Users/%s:/bin/bash\n",
++		"%s:*:%d:%d::0:0:%s:/Users/%s:/bin/zsh\n",
+ 		passwd_entry->pw_name,
+ 		passwd_entry->pw_uid,
+ 		passwd_entry->pw_gid,
++		full_name,
+ 		passwd_entry->pw_name
+ 	);
+ 	fclose(file);
 diff --git a/src/startup/darling.h b/src/startup/darling.h
 index 1a49e2f5..48a5c735 100644
 --- a/src/startup/darling.h
