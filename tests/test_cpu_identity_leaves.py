@@ -82,7 +82,9 @@ int main(void) {
         hw = new_side('xnu_syscall/bsd/helper/misc/sysctl_hw.c')
         for name in ('cachelinesize', 'l1icachesize', 'l1dcachesize', 'l2cachesize', 'l3cachesize', 'tbfrequency'):
             self.assertIn('.name = "%s"' % name, hw)
-        self.assertIn('value = 1000000000ULL', hw)
+        self.assertIn('*value = 1000000000ULL', hw)
+        # Leaf handlers are called with name == NULL; they must not look at their OID.
+        self.assertNotIn('name[nlen - 1]', hw)
         kern = new_side('xnu_syscall/bsd/helper/misc/sysctl_kern.c')
         self.assertIn('.name = "uuid"', kern)
         self.assertIn('.name = "bootsessionuuid"', kern)
