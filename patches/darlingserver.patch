@@ -363,7 +363,7 @@ index 0000000..1741d59
 +	free(fp);
 +}
 diff --git a/duct-tape/src/host.c b/duct-tape/src/host.c
-index a841dfd..9fe8bb4 100644
+index a841dfd..856192c 100644
 --- a/duct-tape/src/host.c
 +++ b/duct-tape/src/host.c
 @@ -28,6 +28,64 @@ long sysconf(int name);
@@ -431,7 +431,24 @@ index a841dfd..9fe8bb4 100644
  static void cache_sysinfo(void* context) {
  	struct sysinfo* cached_sysinfo = context;
  
-@@ -73,11 +131,16 @@ kern_return_t host_info(host_t host, host_flavor_t flavor, host_info_t info, mac
+@@ -55,9 +113,14 @@ kern_return_t host_info(host_t host, host_flavor_t flavor, host_info_t info, mac
+ 
+ 			libsimple_once(&once_token, cache_sysinfo, &cached_sysinfo);
+ 
+-			uint64_t memsize = cached_sysinfo.totalram * cached_sysinfo.mem_unit;
++			// darling-lol: the emulated MacBookPro16,1 has 16 GB, as libsystem_kernel's
++			// hw.memsize reports; clients that ask Mach directly (Chromium's
++			// SysInfo::AmountOfPhysicalMemory, sent in update checks) saw the host's
++			// usable RAM (e.g. 15 GB), which no Mac has. memory_size is the legacy
++			// 32-bit field, capped at 2 GB as on xnu.
++			uint64_t memsize = 17179869184ULL;
+ 
+-			basic_info->memory_size = memsize;
++			basic_info->memory_size = (natural_t)(memsize > 0x80000000ULL ? 0x80000000ULL : memsize);
+ #if __x86_64__ || __i386__
+ 			basic_info->cpu_type = CPU_TYPE_X86;
+ #if __x86_64__
+@@ -73,11 +136,16 @@ kern_return_t host_info(host_t host, host_flavor_t flavor, host_info_t info, mac
  
  			// if there's room for the modern structure, fill in some additional info
  			if (*count >= HOST_BASIC_INFO_COUNT) {

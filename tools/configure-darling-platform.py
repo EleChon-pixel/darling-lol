@@ -17,6 +17,9 @@ from xml.parsers.expat import ExpatError
 MAX_SIZE = 65536
 BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
 KNOWN_SERIAL = 'C02ZL0GVMD6N'
+# Apple, Inc. OUIs (IEEE registry) for a generated ROM, which is also en0's address:
+# a Mac's built-in network interface carries Apple's OUI.
+APPLE_OUIS = ('3C22FB', 'F01898', 'A483E7', 'F8FFC2', 'ACBC32', '8C8590', '88665A', '147DDA')
 KNOWN_UUID = '6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B'
 # Each profile is one real Mac configuration. Every value a guest can query
 # (sysctl, IOKit, Metal, hostname) comes from the same profile so they agree.
@@ -102,7 +105,7 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'gpu.discrete.name', 'gpu.discrete.vendor', 'gpu.discrete.device',
                          'home.isolated', 'host.hide', 'cpu.emulate_cpuid',
                          'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
-                         'cpu.cpuid_max_leaf', 'kern.uuid')
+                         'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
@@ -266,6 +269,11 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
     values['host.hide'] = '0' if show_host else '1'
     # CPUID instructions report the profile's CPU (libsystem_kernel sigexc.c).
     values['cpu.emulate_cpuid'] = '0' if host_cpuid else '1'
+    # en0 reports the machine's ROM as its address, as on a Mac, instead of the host
+    # adapter's (libsystem_kernel sysctl_net.c; needs host.hide).
+    rom = properties.get('ROM')
+    if isinstance(rom, (bytes, bytearray)) and len(rom) == 6 and not rom[0] & 1:
+        values['net.en0.ether'] = ':'.join('%02x' % byte for byte in rom)
     for key in values:
         validate_runtime_string(key, values[key])
     return values
@@ -397,13 +405,12 @@ def provision(properties, rom_oui=None, hardware_profile=None, new_serial=False)
         result['IOPlatformUUID'] = (result['provisioning_UDID'] if 'provisioning_UDID' in result else
             str(uuid.UUID(bytes_le=result['system-id']) if 'system-id' in result else uuid.uuid4()).upper())
     result.setdefault('provisioning_UDID', result['IOPlatformUUID'])
+    # Earlier provisioning generated a locally administered ROM, which no Mac has.
+    if 'ROM' in result and result['ROM'][0] & 2 and rom_oui is None:
+        result.pop('ROM')
     if 'ROM' not in result:
-        if rom_oui is not None:
-            result['ROM'] = rom_oui + secrets.token_bytes(3)
-        else:
-            value = bytearray(secrets.token_bytes(6))
-            value[0] = (value[0] | 2) & 0xfe  # locally administered, unicast
-            result['ROM'] = bytes(value)
+        oui = rom_oui if rom_oui is not None else bytes.fromhex(secrets.choice(APPLE_OUIS))
+        result['ROM'] = oui + secrets.token_bytes(3)
     return validate(result)
 
 
@@ -541,7 +548,7 @@ def main(argv=None):
                         help='Leave CPUID instructions reporting the host CPU (no CPUID faulting)')
     parser.add_argument('--host-home-links', action='store_true',
                         help='Keep Darling\'s LinuxHome and Desktop/Documents/... links to the host home')
-    parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
+    parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is one of Apple\'s')
     parser.add_argument('--replace-known-defaults', action='store_true',
                         help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
     parser.add_argument('--write', action='store_true', help='Write validated overrides to a stopped prefix (otherwise preview only)')
