@@ -3791,10 +3791,10 @@ new file mode 100644
 +#endif
 diff --git a/src/IOGraphicsDevices.mm b/src/IOGraphicsDevices.mm
 new file mode 100644
-index 0000000..de76481
+index 0000000..ddf994f
 --- /dev/null
 +++ b/src/IOGraphicsDevices.mm
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,267 @@
 +#include "IOGraphicsDevices.h"
 +#import <Foundation/NSArray.h>
 +#import <Foundation/NSData.h>
@@ -3886,6 +3886,15 @@ index 0000000..de76481
 +		{
 +			profile->revisionID = revisionID;
 +			return true;
++		}
++		// A provisioned integrated-only Mac (e.g. a Mac mini) configures the integrated
++		// GPU but no discrete one: its host discrete GPUs must not be published at all,
++		// instead of falling back to a default AMD/NVIDIA this Mac never had.
++		if (vendorID == 0x1002 || vendorID == 0x10de)
++		{
++			Profile integrated;
++			if (configuredProfile("integrated", &integrated))
++				return false;
 +		}
 +	}
 +
