@@ -69,6 +69,36 @@ HARDWARE_PROFILES = {
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x9BC8),
         'gpu_discrete': ('AMD Radeon Pro 5300', 0x1002, 0x7340),
     },
+    'macmini8,1': {
+        'model': 'Macmini8,1',
+        'manufacturer': 'Apple Inc.',
+        'cpu_vendor': 'GenuineIntel',
+        # Same Coffee Lake microarchitecture as the MacBookPro16,1's i9, so the family
+        # id, leaf-7 feature mask and cache-leaf encoding carry over unchanged; only the
+        # stepping (D->A), brand, frequency and L3 size differ. i7-8700B is the mini's
+        # BGA part (note the B suffix), 6C/12T, 12 MB L3.
+        'cpu_brand': 'Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz',
+        'cpu_signature': 0x906EA,      # family 6, model 158 (0x9E), stepping 10
+        'cpu_family_id': 0x0F817246,
+        'cpu_frequency': 3200000000,
+        'threads_per_core': 2,
+        'caches': (32768, 32768, 262144, 12582912),  # L3 12 MB (6-core part)
+        'cpuid_max_leaf': 0x16,
+        # board-id verified against AppleDB and Geekbench Macmini8,1 uploads (the
+        # OpenCore docs' Mac-7BA5B2D9E42DDD94 is only a sample value, not this model).
+        'board_id': 'Mac-7BA5B2DFE22DDD8C',
+        'target_type': 'J174',         # 2018 Mac mini internal codename
+        'hostname': 'Mac-mini.local',
+        # A Mac mini has only the integrated GPU; no discrete.
+        'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
+        # Serial format and the 25 model-config codes are from Acidanthera macserial's
+        # Macmini8,1 table (ApplePlatformData example "C07XL9WEJYVX": plant C07, year X).
+        'serial_plants': ('C07',),
+        'serial_halves': ('X',),
+        'serial_configs': ('JYVX', 'JYVW', 'JYVY', 'JYW0', 'L960', 'MCD6', 'M7FV', 'M7FT',
+                           'M99Q', 'M99P', 'MJHL', 'MHGQ', 'LVVM', 'LVVN', 'MKTR', 'LVVL',
+                           'LVVJ', 'LVVK', 'LHPC', 'M99N', 'L95X', 'L95Y', 'N6VR', 'PJH7', 'PJH8'),
+    },
 }
 OS_PROFILES = {
     # Released Intel-compatible Apple version/build pairs.  The build is part
@@ -259,7 +289,10 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
             values[key] = str(size)
         values['cpu.cpuid_max_leaf'] = '0x%X' % selected['cpuid_max_leaf']
     for slot in ('integrated', 'discrete'):
-        name, vendor, device = selected['gpu_' + slot]
+        gpu = selected.get('gpu_' + slot)
+        if not gpu:
+            continue  # e.g. a Mac mini has no discrete GPU
+        name, vendor, device = gpu
         values['gpu.%s.name' % slot] = name
         values['gpu.%s.vendor' % slot] = '0x%04X' % vendor
         values['gpu.%s.device' % slot] = '0x%04X' % device
