@@ -48,7 +48,7 @@ class ProvisioningChecks(unittest.TestCase):
             self.assertEqual(value['system-id'], parsed.bytes_le)
             self.assertEqual(value['provisioning_UDID'], str(parsed).upper())
             self.assertEqual(len(value['ROM']), 6)
-            self.assertEqual(value['ROM'][0] & 3, 2)
+            self.assertIn(value['ROM'][:3].hex().upper(), platform.APPLE_OUIS)
         self.assertEqual(len({v['IOPlatformUUID'] for v in values}), len(values))
 
     def test_preview_does_not_create_prefix(self):
@@ -112,7 +112,9 @@ class ProvisioningChecks(unittest.TestCase):
             'hw.l3cachesize': '12582912',
             'cpu.cpuid_max_leaf': '0x16',
             'kern.uuid': 'C1F19971-4298-505F-8B42-FD09528F7BF0',
+            'net.en0.ether': properties['ROM'].hex(':'),
         })
+        self.assertIn(properties['ROM'][:3].hex().upper(), platform.APPLE_OUIS)
         version = plistlib.loads((self.prefix /
             'System/Library/CoreServices/SystemVersion.plist').read_bytes())
         self.assertEqual(version['ProductVersion'], runtime['kern.osproductversion'])
@@ -174,6 +176,11 @@ class ProvisioningChecks(unittest.TestCase):
         legacy.write_text(f'SMBIOS_SERIAL_NUMBER={platform.KNOWN_SERIAL}\nSMBIOS_PLATFORM_UUID={platform.KNOWN_UUID}\n')
         self.run_cli('--write')
         self.assertEqual(platform.load(platform.destination(self.prefix)), custom)
+
+    def test_locally_administered_rom_is_replaced(self):
+        old = platform.provision({'ROM': bytes.fromhex('EA06337D811E')})
+        self.assertIn(old['ROM'][:3].hex().upper(), platform.APPLE_OUIS)
+        self.assertEqual(platform.provision(old), old)
 
     def test_explicit_oui_and_existing_rom(self):
         value = platform.provision({}, bytes.fromhex('001122'))

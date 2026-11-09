@@ -4936,10 +4936,10 @@ index 4319355..e82da53 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..a9cdc25 100644
+index 8fabdda..db83ba2 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-@@ -11,17 +11,24 @@
+@@ -11,17 +11,25 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
@@ -4955,6 +4955,7 @@ index 8fabdda..a9cdc25 100644
 +extern int strncmp(const char* a, const char* b, size_t n);
 +extern int strcmp(const char* a, const char* b);
 +extern size_t strlen(const char* string);
++extern int memcmp(const void* a, const void* b, size_t n);
  
  static sysctl_handler(handle_route);
  static int do_iflist(void* old, unsigned long* oldlen);
@@ -4964,7 +4965,7 @@ index 8fabdda..a9cdc25 100644
  #define LINUX_SIOCGIFHWADDR 0x8927
  #define LINUX_SIOCGIFBRDADDR 0x8919
  #define LINUX_SIOCGIFNETMASK 0x891b
-@@ -63,7 +70,8 @@ struct linux_ifreq {
+@@ -63,7 +71,8 @@ struct linux_ifreq {
  };
  
  // arbitrary number; only exists to avoid blowing up the stack
@@ -4974,7 +4975,7 @@ index 8fabdda..a9cdc25 100644
  
  struct linux_ifconf {
  	int lifc_len;
-@@ -88,10 +96,179 @@ const struct known_sysctl sysctls_net[] = {
+@@ -88,10 +97,219 @@ const struct known_sysctl sysctls_net[] = {
  	{ .oid = -1 },
  };
  
@@ -5020,6 +5021,46 @@ index 8fabdda..a9cdc25 100644
 +		char data[DARLING_RUNTIME_IDENTITY_MAX];
 +		state = __darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "host.hide");
 +	}
++	return state;
++}
++
++/*
++ * en0's address from the runtime identity (net.en0.ether, "xx:xx:xx:xx:xx:xx", the
++ * machine's ROM). A Mac's built-in en0 carries Apple's OUI; the host adapter's address
++ * names another vendor and is a real hardware identifier, so with host.hide=1 and this
++ * key en0 reports it and the other host adapters get addresses derived from it.
++ */
++static bool identity_en0_mac(unsigned char* out) {
++	static int state = -1;
++	static unsigned char cached[MAC_LENGTH];
++	if (state < 0) {
++		char data[DARLING_RUNTIME_IDENTITY_MAX];
++		char text[24];
++		state = 0;
++		if (__darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "host.hide") &&
++				darling_identity_lookup(data, "net.en0.ether", text, sizeof(text)) && strlen(text) == 17) {
++			state = 1;
++			for (int i = 0; i < MAC_LENGTH && state; i++) {
++				unsigned int byte = 0;
++				for (int j = 0; j < 2; j++) {
++					char c = text[i * 3 + j];
++					unsigned int digit = (c >= '0' && c <= '9') ? (unsigned int)(c - '0') :
++						(c >= 'a' && c <= 'f') ? (unsigned int)(c - 'a' + 10) :
++						(c >= 'A' && c <= 'F') ? (unsigned int)(c - 'A' + 10) : 16u;
++					if (digit > 15)
++						state = 0;
++					byte = byte * 16 + digit;
++				}
++				if (i < MAC_LENGTH - 1 && text[i * 3 + 2] != ':')
++					state = 0;
++				cached[i] = (unsigned char) byte;
++			}
++			if (cached[0] & 0x01)
++				state = 0; /* multicast */
++		}
++	}
++	if (state)
++		memcpy(out, cached, MAC_LENGTH);
 +	return state;
 +}
 +
@@ -5154,7 +5195,7 @@ index 8fabdda..a9cdc25 100644
  static int do_iflist(void* old, unsigned long* oldlen) {
  	// we only do IPv4 addresses for now
  	int tmp_sock;
-@@ -107,19 +284,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -107,19 +325,35 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
  		goto out;
  
@@ -5173,6 +5214,7 @@ index 8fabdda..a9cdc25 100644
 +	}
 +	size_t shown = 0;
 +	unsigned char en0_mac[MAC_LENGTH] = { 0x3c, 0x22, 0xfb, 0x00, 0x00, 0x00 };
++	bool fixed_en0 = rename && identity_en0_mac(en0_mac);
 +
  	for (int i = 0; i < lifc.lifc_len; i += sizeof(struct linux_ifreq)) {
  		struct linux_ifreq* curr = &lifc.lifc_req[i / sizeof(struct linux_ifreq)];
@@ -5192,7 +5234,7 @@ index 8fabdda..a9cdc25 100644
  
  		if (old && *oldlen >= total_len + ifm_length) {
  			struct if_msghdr* ifm = (void*)old_ptr;
-@@ -142,13 +334,25 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -142,13 +376,32 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  			dl->sdl_alen = MAC_LENGTH;
  			dl->sdl_slen = 0; // ???
  
@@ -5214,12 +5256,19 @@ index 8fabdda..a9cdc25 100644
  			if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFHWADDR, &tmp)) < 0)
  				goto out;
  			memcpy(LLADDR(dl), tmp.lifr_hwaddr.sa_data, MAC_LENGTH);
-+			if (strcmp(shown_name, "en0") == 0)
++			static const unsigned char no_mac[MAC_LENGTH];
++			if (fixed_en0 && memcmp(tmp.lifr_hwaddr.sa_data, no_mac, MAC_LENGTH) != 0) {
++				/* lo0 and tunnels have no address and keep none */
++				if (strcmp(shown_name, "en0") == 0)
++					memcpy(LLADDR(dl), en0_mac, MAC_LENGTH);
++				else
++					phantom_mac(en0_mac, shown_name, (unsigned char*) LLADDR(dl));
++			} else if (strcmp(shown_name, "en0") == 0)
 +				memcpy(en0_mac, tmp.lifr_hwaddr.sa_data, MAC_LENGTH);
  
  			old_ptr += ifm_length;
  		}
-@@ -188,6 +392,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -188,6 +441,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  		total_len += ifam_length;
  	}
  
