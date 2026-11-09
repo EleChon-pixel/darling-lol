@@ -3629,10 +3629,10 @@ index 90155ed..0db159b 100644
  
 diff --git a/src/PlatformIdentity.h b/src/PlatformIdentity.h
 new file mode 100644
-index 0000000..4ebfacd
+index 0000000..6e50dd0
 --- /dev/null
 +++ b/src/PlatformIdentity.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,86 @@
 +#ifndef DARLING_PLATFORM_IDENTITY_H
 +#define DARLING_PLATFORM_IDENTITY_H
 +#import <Foundation/Foundation.h>
@@ -3660,7 +3660,12 @@ index 0000000..4ebfacd
 +    if (![schema isKindOfClass:[NSNumber class]] || CFGetTypeID((CFTypeRef)schema) == CFBooleanGetTypeID() ||
 +        strchr("fd", [schema objCType][0]) || [schema longLongValue] != 1) return nil;
 +    id source = [configuration objectForKey:@"properties"];
-+    if (![source isKindOfClass:[NSDictionary class]] || [source count] > 10) return nil;
++    // Up to the full identity set; the loop below rejects any key outside the
++    // accepted set (11 today: UUID, provisioning_UDID, ROM, system-id, serial,
++    // manufacturer, model, product-name, board-id, mlb-serial-number, target-type),
++    // so this is only a sanity bound. It was 10 and silently rejected every
++    // provisioned plist once target-type made the set 11.
++    if (![source isKindOfClass:[NSDictionary class]] || [source count] > 16) return nil;
 +    NSMutableDictionary* result = [NSMutableDictionary dictionary];
 +    for (id key in source) {
 +        if (![key isKindOfClass:[NSString class]]) return nil;
