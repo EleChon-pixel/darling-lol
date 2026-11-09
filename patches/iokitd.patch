@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 84161fd..50e659b 100644
+index 84161fd..d0c5ea0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -17,6 +17,8 @@ include_directories(
@@ -11,7 +11,7 @@ index 84161fd..50e659b 100644
  
  mig(iokitmig.defs)
  mig(powermanagement.defs)
-@@ -36,7 +38,14 @@ set(iokitd_sources
+@@ -36,7 +38,15 @@ set(iokitd_sources
  	src/IODisplayConnect.mm
  	src/IODisplayConnectX11.mm
  	src/PowerAssertions.mm
@@ -19,6 +19,7 @@ index 84161fd..50e659b 100644
  	src/PowerAssertionsX11.mm
 +	src/IOPlatformExpertDevice.mm
 +	src/IOGraphicsDevices.mm
++	src/IOHardwareDevices.mm
 +	src/IOPMrootDomain.mm
 +	src/IOInterestNotification.mm
 +	src/LogindSleep.c
@@ -798,20 +799,21 @@ index aaed046..7a190c3 100644
 +	}
 +}
 diff --git a/src/main.mm b/src/main.mm
-index 37ce9b8..f89d72c 100644
+index 37ce9b8..8050975 100644
 --- a/src/main.mm
 +++ b/src/main.mm
-@@ -32,6 +32,9 @@
+@@ -32,6 +32,10 @@
  #include "IODisplayConnectX11.h"
  #include "PowerAssertions.h"
  #include "IOSurfaceRoot.h"
 +#include "IOPlatformExpertDevice.h"
 +#include "IOGraphicsDevices.h"
++#include "IOHardwareDevices.h"
 +#include "IOPMrootDomain.h"
  
  extern "C" {
  #include "iokitmigServer.h"
-@@ -127,6 +130,8 @@ int main(int argc, const char** argv)
+@@ -127,6 +131,8 @@ int main(int argc, const char** argv)
  	dispatch_resume(deathSource);
  	dispatch_resume(pwrMgmtPortSource);
  
@@ -820,12 +822,13 @@ index 37ce9b8..f89d72c 100644
  	os_log(OS_LOG_DEFAULT, "iokitd up and running.");
  
  	dispatch_main();
-@@ -146,5 +151,8 @@ static void discoverAllDevices()
+@@ -146,5 +152,9 @@ static void discoverAllDevices()
  	// Trick to make sure the root object gets instantiated first and gets the lowest ID
  	IORegistryEntry::root();
  	IODisplayConnectX11::discoverDevices(registry);
 +	IOPlatformExpertDevice::registerSelf(registry);
 +	IOGraphicsDevices::discoverDevices(registry, IOPlatformExpertDevice::instance());
++	IOHardwareDevices::discoverDevices(registry, IOPlatformExpertDevice::instance());
  	IOSurfaceRoot::registerSelf(registry);
 +	IOPMrootDomain::registerSelf(registry);
  }
@@ -4043,5 +4046,294 @@ index 0000000..de76481
 +		registry->registerService(device);
 +		registry->registerService(accelerator);
 +		slot = true;
++	}
++}
+diff --git a/src/IOHardwareDevices.h b/src/IOHardwareDevices.h
+new file mode 100644
+index 0000000..203c983
+--- /dev/null
++++ b/src/IOHardwareDevices.h
+@@ -0,0 +1,72 @@
++#ifndef IOKITD_IOHARDWAREDEVICES_H
++#define IOKITD_IOHARDWAREDEVICES_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++#include <cstdint>
++#include <string>
++
++// The built-in network and storage of a MacBookPro16,1, enough for the hardware
++// identifiers anti-cheat and licensing code reads from IOKit: the primary MAC
++// address (IONetworkController's IOMACAddress, under an en0 IOEthernetInterface)
++// and the internal SSD serial (IONVMeController's "Serial Number", over an
++// IOMedia whole-disk nub). Values come from the per-prefix runtime identity
++// (net.en0.ether, hw.disk.serial, hw.disk.model, hw.disk.size); without them no
++// nub is published, so a prefix that was never provisioned is unchanged.
++
++class IONetworkController : public IOService
++{
++public:
++	explicit IONetworkController(const uint8_t mac[6]);
++	const char* className() const override { return "IONetworkController"; }
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++private:
++	uint8_t m_mac[6];
++};
++
++class IOEthernetInterface : public IOService
++{
++public:
++	explicit IOEthernetInterface(const uint8_t mac[6]) : m_mac{ mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] } {}
++	const char* className() const override { return "IOEthernetInterface"; }
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++private:
++	uint8_t m_mac[6];
++};
++
++class IONVMeController : public IOService
++{
++public:
++	IONVMeController(std::string serial, std::string model);
++	const char* className() const override { return "IONVMeController"; }
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++private:
++	std::string m_serial, m_model;
++};
++
++class IOMediaWholeDisk : public IOService
++{
++public:
++	explicit IOMediaWholeDisk(uint64_t size) : m_size(size) {}
++	const char* className() const override { return "IOMedia"; }
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++private:
++	uint64_t m_size;
++};
++
++namespace IOHardwareDevices
++{
++	// Publishes the en0 network controller/interface and the internal NVMe
++	// controller with its whole-disk IOMedia, when the identity provides them.
++	void discoverDevices(ServiceRegistry* registry, IORegistryEntry* platform);
++}
++
++#endif
+diff --git a/src/IOHardwareDevices.mm b/src/IOHardwareDevices.mm
+new file mode 100644
+index 0000000..e78274f
+--- /dev/null
++++ b/src/IOHardwareDevices.mm
+@@ -0,0 +1,205 @@
++#include "IOHardwareDevices.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++#include <os/log.h>
++#include <cstdio>
++#include <cstring>
++#include <string>
++
++// Same per-prefix identity file the GPU and libsystem_kernel code reads.
++static bool runtimeIdentity(const char* key, std::string* value)
++{
++	FILE* file = fopen("/private/etc/darling-runtime-identity.conf", "r");
++	if (!file)
++		return false;
++	char line[512];
++	const size_t keyLength = std::strlen(key);
++	bool found = false;
++	while (!found && fgets(line, sizeof(line), file))
++	{
++		line[std::strcspn(line, "\r\n")] = '\0';
++		if (std::strncmp(line, key, keyLength) == 0 && line[keyLength] == '=' && line[keyLength + 1])
++		{
++			value->assign(line + keyLength + 1);
++			found = true;
++		}
++	}
++	fclose(file);
++	return found;
++}
++
++// "xx:xx:xx:xx:xx:xx" -> six bytes; false unless exactly that shape.
++static bool parseMac(const std::string& text, uint8_t out[6])
++{
++	if (text.size() != 17)
++		return false;
++	for (int i = 0; i < 6; i++)
++	{
++		char* end = nullptr;
++		const unsigned long byte = strtoul(text.c_str() + i * 3, &end, 16);
++		if (end != text.c_str() + i * 3 + 2 || byte > 0xff)
++			return false;
++		if (i < 5 && text[i * 3 + 2] != ':')
++			return false;
++		out[i] = uint8_t(byte);
++	}
++	return true;
++}
++
++static NSData* macData(const uint8_t mac[6])
++{
++	return [NSData dataWithBytes: mac length: 6];
++}
++
++// ------------------------------------------------------------------ network
++
++IONetworkController::IONetworkController(const uint8_t mac[6])
++{
++	std::memcpy(m_mac, mac, 6);
++}
++
++NSDictionary* IONetworkController::matchingDictionary()
++{
++	return @{ @"IOProviderClass": @"IONetworkController", @"IOClass": @"IONetworkController" };
++}
++
++NSDictionary* IONetworkController::getProperties()
++{
++	return @{
++		@"IOClass": @"AppleBCMWLANCore",
++		@"IOMACAddress": macData(m_mac),
++		@"IOModel": @"Wi-Fi",
++		@"IOBuiltin": @YES,
++	};
++}
++
++bool IONetworkController::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IONetworkController") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOEthernetInterface::matchingDictionary()
++{
++	return @{ @"IOProviderClass": @"IOEthernetInterface", @"IOClass": @"IOEthernetInterface" };
++}
++
++NSDictionary* IOEthernetInterface::getProperties()
++{
++	return @{
++		@"IOClass": @"IOEthernetInterface",
++		@"IOMACAddress": macData(m_mac),
++		@"BSD Name": @"en0",
++		@"IOInterfaceType": @6,          // IFT_ETHER / IEEE 802.3
++		@"IOInterfaceUnit": @0,
++		@"IOInterfaceNamePrefix": @"en",
++		@"IOPrimaryInterface": @YES,
++		@"IOBuiltin": @YES,
++	};
++}
++
++bool IOEthernetInterface::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOEthernetInterface") == 0 || std::strcmp(className, "IONetworkInterface") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++// ------------------------------------------------------------------ storage
++
++IONVMeController::IONVMeController(std::string serial, std::string model)
++: m_serial(std::move(serial)), m_model(std::move(model))
++{
++}
++
++NSDictionary* IONVMeController::matchingDictionary()
++{
++	return @{ @"IOProviderClass": @"IONVMeController", @"IOClass": @"IONVMeController" };
++}
++
++NSDictionary* IONVMeController::getProperties()
++{
++	return @{
++		@"IOClass": @"IONVMeController",
++		@"Model": [NSString stringWithUTF8String: m_model.c_str()],
++		@"Serial Number": [NSString stringWithUTF8String: m_serial.c_str()],
++		@"IOBuiltin": @YES,
++	};
++}
++
++bool IONVMeController::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IONVMeController") == 0 || std::strcmp(className, "IOBlockStorageDevice") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOMediaWholeDisk::matchingDictionary()
++{
++	return @{ @"IOProviderClass": @"IOMedia", @"IOClass": @"IOMedia" };
++}
++
++NSDictionary* IOMediaWholeDisk::getProperties()
++{
++	return @{
++		@"IOClass": @"IOMedia",
++		@"BSD Name": @"disk0",
++		@"Whole": @YES,
++		@"Leaf": @NO,
++		@"Writable": @YES,
++		@"Removable": @NO,
++		@"Ejectable": @NO,
++		@"Size": @(m_size),
++		@"Preferred Block Size": @4096,
++		@"Content": @"",
++	};
++}
++
++bool IOMediaWholeDisk::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOMedia") == 0 || std::strcmp(className, "IOStorage") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++// ------------------------------------------------------------------ publish
++
++void IOHardwareDevices::discoverDevices(ServiceRegistry* registry, IORegistryEntry* platform)
++{
++	std::string macText;
++	uint8_t mac[6];
++	if (runtimeIdentity("net.en0.ether", &macText) && parseMac(macText, mac))
++	{
++		IONetworkController* controller = new IONetworkController(mac);
++		IOEthernetInterface* interface = new IOEthernetInterface(mac);
++		controller->registerInPlane(kIOServicePlane, "en0", platform);
++		interface->registerInPlane(kIOServicePlane, "en0", controller);
++		registry->registerService(controller);
++		registry->registerService(interface);
++	}
++
++	std::string serial, model, sizeText;
++	if (runtimeIdentity("hw.disk.serial", &serial) && !serial.empty())
++	{
++		if (!runtimeIdentity("hw.disk.model", &model) || model.empty())
++			model = "APPLE SSD";
++		uint64_t size = 500277790720ULL; // 512 GB, as Apple reports it
++		if (runtimeIdentity("hw.disk.size", &sizeText))
++		{
++			char* end = nullptr;
++			const unsigned long long parsed = strtoull(sizeText.c_str(), &end, 10);
++			if (end != sizeText.c_str() && *end == '\0' && parsed != 0)
++				size = parsed;
++		}
++		IONVMeController* nvme = new IONVMeController(serial, model);
++		IOMediaWholeDisk* media = new IOMediaWholeDisk(size);
++		nvme->registerInPlane(kIOServicePlane, "AppleANS2Controller", platform);
++		media->registerInPlane(kIOServicePlane, "IOMedia", nvme);
++		registry->registerService(nvme);
++		registry->registerService(media);
 +	}
 +}
