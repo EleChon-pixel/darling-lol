@@ -86,6 +86,7 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(properties['manufacturer'], 'Apple Inc.')
         runtime = platform.load_runtime_identity(
             self.prefix / 'private/etc/darling-runtime-identity.conf')
+        self.assertRegex(runtime.pop('hw.disk.serial'), r'^[0-9A-Z]{12}$')
         self.assertEqual(runtime, {
             'hw.model': 'iMac20,1',
             'machdep.cpu.vendor': 'GenuineIntel',
@@ -113,6 +114,8 @@ class ProvisioningChecks(unittest.TestCase):
             'cpu.cpuid_max_leaf': '0x16',
             'kern.uuid': 'C1F19971-4298-505F-8B42-FD09528F7BF0',
             'net.en0.ether': properties['ROM'].hex(':'),
+            'hw.disk.model': 'APPLE SSD AP0512Q',
+            'hw.disk.size': '500277790720',
         })
         self.assertIn(properties['ROM'][:3].hex().upper(), platform.APPLE_OUIS)
         version = plistlib.loads((self.prefix /

@@ -12,6 +12,7 @@ import pwd
 import shlex
 import tempfile
 import uuid
+import hashlib
 from xml.parsers.expat import ExpatError
 
 MAX_SIZE = 65536
@@ -105,7 +106,8 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'gpu.discrete.name', 'gpu.discrete.vendor', 'gpu.discrete.device',
                          'home.isolated', 'host.hide', 'cpu.emulate_cpuid',
                          'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
-                         'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether')
+                         'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether',
+                         'hw.disk.serial', 'hw.disk.model', 'hw.disk.size')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
@@ -274,6 +276,16 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
     rom = properties.get('ROM')
     if isinstance(rom, (bytes, bytearray)) and len(rom) == 6 and not rom[0] & 1:
         values['net.en0.ether'] = ':'.join('%02x' % byte for byte in rom)
+    # The internal SSD's serial and model, for the IONVMeController IOKit reads for a
+    # hardware ID. The serial is derived from the platform UUID so it is stable per
+    # prefix without storing another identifier; the model and size are an Apple SSD's.
+    platform_uuid = properties.get('IOPlatformUUID')
+    if platform_uuid:
+        digest = hashlib.sha256(('darling-lol:disk:' + platform_uuid).encode()).digest()
+        serial = ''.join(BASE34[byte % len(BASE34)] for byte in digest[:12])
+        values['hw.disk.serial'] = serial
+        values['hw.disk.model'] = 'APPLE SSD AP0512Q'
+        values['hw.disk.size'] = '500277790720'
     for key in values:
         validate_runtime_string(key, values[key])
     return values
