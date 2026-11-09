@@ -89,6 +89,7 @@ HARDWARE_PROFILES = {
         'board_id': 'Mac-7BA5B2DFE22DDD8C',
         'target_type': 'J174',         # 2018 Mac mini internal codename
         'hostname': 'Mac-mini.local',
+        'en0_wired': True,             # a mini's en0 is built-in Ethernet, en1 is Wi-Fi
         # A Mac mini has only the integrated GPU; no discrete.
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
         # Serial format and the 25 model-config codes are from Acidanthera macserial's
@@ -137,7 +138,8 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'home.isolated', 'host.hide', 'cpu.emulate_cpuid',
                          'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
                          'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether',
-                         'hw.disk.serial', 'hw.disk.model', 'hw.disk.size')
+                         'hw.disk.serial', 'hw.disk.model', 'hw.disk.size',
+                         'net.en0.wired', 'net.en1.ether')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
@@ -319,6 +321,15 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
         values['hw.disk.serial'] = serial
         values['hw.disk.model'] = 'APPLE SSD AP0512Q'
         values['hw.disk.size'] = '500277790720'
+    # A desktop Mac's en0 is built-in Ethernet (not Wi-Fi); it also has a separate
+    # Wi-Fi interface (en1) with its own Apple-OUI address, derived from the platform
+    # UUID so it is stable and distinct from en0's ROM address.
+    if selected.get('en0_wired'):
+        values['net.en0.wired'] = '1'
+        if platform_uuid:
+            d = hashlib.sha256(('darling-lol:en1:' + platform_uuid).encode()).digest()
+            oui = bytes.fromhex(APPLE_OUIS[d[0] % len(APPLE_OUIS)])
+            values['net.en1.ether'] = ':'.join('%02x' % b for b in (oui + d[1:4]))
     for key in values:
         validate_runtime_string(key, values[key])
     return values

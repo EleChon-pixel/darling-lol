@@ -4936,7 +4936,7 @@ index 4319355..e82da53 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..db83ba2 100644
+index 8fabdda..c7cf8ac 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 @@ -11,17 +11,25 @@
@@ -4975,7 +4975,7 @@ index 8fabdda..db83ba2 100644
  
  struct linux_ifconf {
  	int lifc_len;
-@@ -88,10 +97,219 @@ const struct known_sysctl sysctls_net[] = {
+@@ -88,10 +97,247 @@ const struct known_sysctl sysctls_net[] = {
  	{ .oid = -1 },
  };
  
@@ -5030,50 +5030,78 @@ index 8fabdda..db83ba2 100644
 + * names another vendor and is a real hardware identifier, so with host.hide=1 and this
 + * key en0 reports it and the other host adapters get addresses derived from it.
 + */
++static bool identity_mac(const char* key, unsigned char* out) {
++	char data[DARLING_RUNTIME_IDENTITY_MAX];
++	char text[24];
++	int state = 0;
++	if (__darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "host.hide") &&
++			darling_identity_lookup(data, key, text, sizeof(text)) && strlen(text) == 17) {
++		state = 1;
++		for (int i = 0; i < MAC_LENGTH && state; i++) {
++			unsigned int byte = 0;
++			for (int j = 0; j < 2; j++) {
++				char c = text[i * 3 + j];
++				unsigned int digit = (c >= '0' && c <= '9') ? (unsigned int)(c - '0') :
++					(c >= 'a' && c <= 'f') ? (unsigned int)(c - 'a' + 10) :
++					(c >= 'A' && c <= 'F') ? (unsigned int)(c - 'A' + 10) : 16u;
++				if (digit > 15)
++					state = 0;
++				byte = byte * 16 + digit;
++			}
++			if (i < MAC_LENGTH - 1 && text[i * 3 + 2] != ':')
++				state = 0;
++			out[i] = (unsigned char) byte;
++		}
++		if (out[0] & 0x01)
++			state = 0; /* multicast */
++	}
++	return state;
++}
++
++/* en0's address (net.en0.ether, the ROM). Cached: read once. */
 +static bool identity_en0_mac(unsigned char* out) {
 +	static int state = -1;
 +	static unsigned char cached[MAC_LENGTH];
-+	if (state < 0) {
-+		char data[DARLING_RUNTIME_IDENTITY_MAX];
-+		char text[24];
-+		state = 0;
-+		if (__darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "host.hide") &&
-+				darling_identity_lookup(data, "net.en0.ether", text, sizeof(text)) && strlen(text) == 17) {
-+			state = 1;
-+			for (int i = 0; i < MAC_LENGTH && state; i++) {
-+				unsigned int byte = 0;
-+				for (int j = 0; j < 2; j++) {
-+					char c = text[i * 3 + j];
-+					unsigned int digit = (c >= '0' && c <= '9') ? (unsigned int)(c - '0') :
-+						(c >= 'a' && c <= 'f') ? (unsigned int)(c - 'a' + 10) :
-+						(c >= 'A' && c <= 'F') ? (unsigned int)(c - 'A' + 10) : 16u;
-+					if (digit > 15)
-+						state = 0;
-+					byte = byte * 16 + digit;
-+				}
-+				if (i < MAC_LENGTH - 1 && text[i * 3 + 2] != ':')
-+					state = 0;
-+				cached[i] = (unsigned char) byte;
-+			}
-+			if (cached[0] & 0x01)
-+				state = 0; /* multicast */
-+		}
-+	}
++	if (state < 0)
++		state = identity_mac("net.en0.ether", cached);
 +	if (state)
 +		memcpy(out, cached, MAC_LENGTH);
 +	return state;
 +}
 +
++/* en1's address (net.en1.ether), when a desktop Mac has a separate Wi-Fi NIC. */
++static bool identity_en1_mac(unsigned char* out) {
++	static int state = -1;
++	static unsigned char cached[MAC_LENGTH];
++	if (state < 0)
++		state = identity_mac("net.en1.ether", cached);
++	if (state)
++		memcpy(out, cached, MAC_LENGTH);
++	return state;
++}
++
++/* True when en0 is built-in Ethernet (desktop Macs: net.en0.wired=1), so the wired
++ * interface is named first. A MacBook leaves it unset and keeps Wi-Fi as en0. */
++static bool en0_is_wired(void) {
++	static int state = -1;
++	if (state < 0) {
++		char data[DARLING_RUNTIME_IDENTITY_MAX];
++		state = __darling_identity_load(data, sizeof(data)) && darling_identity_flag(data, "net.en0.wired");
++	}
++	return state;
++}
 +/* Mac names for the count interfaces in names (LINUX_IFNAMSIZ each); "" = hidden.
 + * Wireless first takes en0, then wired; tunnels are utun0... in order. */
 +static void assign_mac_names(const char (*names)[LINUX_IFNAMSIZ], int count, char (*mac)[LINUX_IFNAMSIZ]) {
 +	int en = 0, utun = 0;
 +	for (int i = 0; i < count; i++)
 +		mac[i][0] = '\0';
++	int first = en0_is_wired() ? IFKIND_WIRED : IFKIND_WIRELESS;
++	int second = en0_is_wired() ? IFKIND_WIRELESS : IFKIND_WIRED;
 +	for (int pass = 0; pass < 2; pass++) {
++		int want = pass == 0 ? first : second;
 +		for (int i = 0; i < count; i++) {
-+			int kind = interface_kind(names[i]);
-+			if ((pass == 0 && kind == IFKIND_WIRELESS) || (pass == 1 && kind == IFKIND_WIRED))
++			if (interface_kind(names[i]) == want)
 +				__simple_sprintf(mac[i], "en%d", en++);
 +		}
 +	}
@@ -5195,7 +5223,7 @@ index 8fabdda..db83ba2 100644
  static int do_iflist(void* old, unsigned long* oldlen) {
  	// we only do IPv4 addresses for now
  	int tmp_sock;
-@@ -107,19 +325,35 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -107,19 +353,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
  		goto out;
  
@@ -5214,7 +5242,9 @@ index 8fabdda..db83ba2 100644
 +	}
 +	size_t shown = 0;
 +	unsigned char en0_mac[MAC_LENGTH] = { 0x3c, 0x22, 0xfb, 0x00, 0x00, 0x00 };
++	unsigned char en1_mac[MAC_LENGTH];
 +	bool fixed_en0 = rename && identity_en0_mac(en0_mac);
++	bool fixed_en1 = rename && identity_en1_mac(en1_mac);
 +
  	for (int i = 0; i < lifc.lifc_len; i += sizeof(struct linux_ifreq)) {
  		struct linux_ifreq* curr = &lifc.lifc_req[i / sizeof(struct linux_ifreq)];
@@ -5234,7 +5264,7 @@ index 8fabdda..db83ba2 100644
  
  		if (old && *oldlen >= total_len + ifm_length) {
  			struct if_msghdr* ifm = (void*)old_ptr;
-@@ -142,13 +376,32 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -142,13 +406,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  			dl->sdl_alen = MAC_LENGTH;
  			dl->sdl_slen = 0; // ???
  
@@ -5261,6 +5291,8 @@ index 8fabdda..db83ba2 100644
 +				/* lo0 and tunnels have no address and keep none */
 +				if (strcmp(shown_name, "en0") == 0)
 +					memcpy(LLADDR(dl), en0_mac, MAC_LENGTH);
++				else if (fixed_en1 && strcmp(shown_name, "en1") == 0)
++					memcpy(LLADDR(dl), en1_mac, MAC_LENGTH);
 +				else
 +					phantom_mac(en0_mac, shown_name, (unsigned char*) LLADDR(dl));
 +			} else if (strcmp(shown_name, "en0") == 0)
@@ -5268,7 +5300,7 @@ index 8fabdda..db83ba2 100644
  
  			old_ptr += ifm_length;
  		}
-@@ -188,6 +441,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -188,6 +473,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  		total_len += ifam_length;
  	}
  
