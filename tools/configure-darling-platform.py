@@ -450,6 +450,18 @@ def provision(properties, rom_oui=None, hardware_profile=None, new_serial=False)
         result.pop('IOPlatformSerialNumber', None)
     if result.get('IOPlatformSerialNumber') == KNOWN_SERIAL:
         result.pop('IOPlatformSerialNumber')
+    # After switching model, a serial we generated for the OLD model still decodes
+    # to that model. Regenerate it for the selected model, but keep an imported or
+    # custom serial (one that fits no known profile's generated format).
+    def _fits(prof, serial):
+        return (prof and 'serial_configs' in prof and len(serial) == 12
+                and serial[:3] in prof['serial_plants']
+                and serial[-len(prof['serial_configs'][0]):] in prof['serial_configs'])
+    hw = HARDWARE_PROFILES.get(hardware_profile)
+    serial = result.get('IOPlatformSerialNumber')
+    if hw and 'serial_configs' in hw and serial and not _fits(hw, serial):
+        if any(_fits(other, serial) for other in HARDWARE_PROFILES.values() if other is not hw):
+            result.pop('IOPlatformSerialNumber')
     if (result.get('IOPlatformUUID', '').upper() == KNOWN_UUID
             or result.get('provisioning_UDID', '').upper() == KNOWN_UUID
             or result.get('system-id') == uuid.UUID(KNOWN_UUID).bytes_le):
