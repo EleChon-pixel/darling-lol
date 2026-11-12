@@ -69,6 +69,39 @@ HARDWARE_PROFILES = {
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x9BC8),
         'gpu_discrete': ('AMD Radeon Pro 5300', 0x1002, 0x7340),
     },
+    'macmini8,1': {
+        'model': 'Macmini8,1',
+        'manufacturer': 'Apple Inc.',
+        'cpu_vendor': 'GenuineIntel',
+        # Same Coffee Lake microarchitecture as the MacBookPro16,1's i9, so the family
+        # id, leaf-7 feature mask and cache-leaf encoding carry over unchanged; only the
+        # stepping (D->A), brand, frequency and L3 size differ. i7-8700B is the mini's
+        # BGA part (note the B suffix), 6C/12T, 12 MB L3.
+        'cpu_brand': 'Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz',
+        'cpu_signature': 0x906EA,      # family 6, model 158 (0x9E), stepping 10
+        'cpu_family_id': 0x0F817246,
+        'cpu_frequency': 3200000000,
+        'threads_per_core': 2,
+        'caches': (32768, 32768, 262144, 12582912),  # L3 12 MB (6-core part)
+        'cpuid_max_leaf': 0x16,
+        # board-id verified against AppleDB and Geekbench Macmini8,1 uploads (the
+        # OpenCore docs' Mac-7BA5B2D9E42DDD94 is only a sample value, not this model).
+        'board_id': 'Mac-7BA5B2DFE22DDD8C',
+        'target_type': 'J174',         # 2018 Mac mini internal codename
+        'hostname': 'Mac-mini.local',
+        'en0_wired': True,             # a mini's en0 is built-in Ethernet, en1 is Wi-Fi
+        'logical_cpus': 12,            # i7-8700B is 6C/12T; report that, not the host count
+        'cpu_frequency_max': 4600000000,  # 4.6 GHz turbo, CPUID leaf 0x16 EBX
+        # A Mac mini has only the integrated GPU; no discrete.
+        'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
+        # Serial format and the 25 model-config codes are from Acidanthera macserial's
+        # Macmini8,1 table (ApplePlatformData example "C07XL9WEJYVX": plant C07, year X).
+        'serial_plants': ('C07',),
+        'serial_halves': ('X',),
+        'serial_configs': ('JYVX', 'JYVW', 'JYVY', 'JYW0', 'L960', 'MCD6', 'M7FV', 'M7FT',
+                           'M99Q', 'M99P', 'MJHL', 'MHGQ', 'LVVM', 'LVVN', 'MKTR', 'LVVL',
+                           'LVVJ', 'LVVK', 'LHPC', 'M99N', 'L95X', 'L95Y', 'N6VR', 'PJH7', 'PJH8'),
+    },
 }
 OS_PROFILES = {
     # Released Intel-compatible Apple version/build pairs.  The build is part
@@ -107,7 +140,9 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'home.isolated', 'host.hide', 'cpu.emulate_cpuid',
                          'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
                          'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether',
-                         'hw.disk.serial', 'hw.disk.model', 'hw.disk.size')
+                         'hw.disk.serial', 'hw.disk.model', 'hw.disk.size',
+                         'net.en0.wired', 'net.en1.ether', 'cpu.logical_count',
+                         'hw.cpufrequency_max')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
@@ -259,7 +294,10 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
             values[key] = str(size)
         values['cpu.cpuid_max_leaf'] = '0x%X' % selected['cpuid_max_leaf']
     for slot in ('integrated', 'discrete'):
-        name, vendor, device = selected['gpu_' + slot]
+        gpu = selected.get('gpu_' + slot)
+        if not gpu:
+            continue  # e.g. a Mac mini has no discrete GPU
+        name, vendor, device = gpu
         values['gpu.%s.name' % slot] = name
         values['gpu.%s.vendor' % slot] = '0x%04X' % vendor
         values['gpu.%s.device' % slot] = '0x%04X' % device
@@ -286,6 +324,19 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
         values['hw.disk.serial'] = serial
         values['hw.disk.model'] = 'APPLE SSD AP0512Q'
         values['hw.disk.size'] = '500277790720'
+    # A desktop Mac's en0 is built-in Ethernet (not Wi-Fi); it also has a separate
+    # Wi-Fi interface (en1) with its own Apple-OUI address, derived from the platform
+    # UUID so it is stable and distinct from en0's ROM address.
+    if selected.get('logical_cpus'):
+        values['cpu.logical_count'] = str(selected['logical_cpus'])
+    if selected.get('cpu_frequency_max'):
+        values['hw.cpufrequency_max'] = str(selected['cpu_frequency_max'])
+    if selected.get('en0_wired'):
+        values['net.en0.wired'] = '1'
+        if platform_uuid:
+            d = hashlib.sha256(('darling-lol:en1:' + platform_uuid).encode()).digest()
+            oui = bytes.fromhex(APPLE_OUIS[d[0] % len(APPLE_OUIS)])
+            values['net.en1.ether'] = ':'.join('%02x' % b for b in (oui + d[1:4]))
     for key in values:
         validate_runtime_string(key, values[key])
     return values
@@ -399,6 +450,18 @@ def provision(properties, rom_oui=None, hardware_profile=None, new_serial=False)
         result.pop('IOPlatformSerialNumber', None)
     if result.get('IOPlatformSerialNumber') == KNOWN_SERIAL:
         result.pop('IOPlatformSerialNumber')
+    # After switching model, a serial we generated for the OLD model still decodes
+    # to that model. Regenerate it for the selected model, but keep an imported or
+    # custom serial (one that fits no known profile's generated format).
+    def _fits(prof, serial):
+        return (prof and 'serial_configs' in prof and len(serial) == 12
+                and serial[:3] in prof['serial_plants']
+                and serial[-len(prof['serial_configs'][0]):] in prof['serial_configs'])
+    hw = HARDWARE_PROFILES.get(hardware_profile)
+    serial = result.get('IOPlatformSerialNumber')
+    if hw and 'serial_configs' in hw and serial and not _fits(hw, serial):
+        if any(_fits(other, serial) for other in HARDWARE_PROFILES.values() if other is not hw):
+            result.pop('IOPlatformSerialNumber')
     if (result.get('IOPlatformUUID', '').upper() == KNOWN_UUID
             or result.get('provisioning_UDID', '').upper() == KNOWN_UUID
             or result.get('system-id') == uuid.UUID(KNOWN_UUID).bytes_le):
