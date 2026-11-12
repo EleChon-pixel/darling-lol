@@ -4979,7 +4979,7 @@ index 4319355..6186a48 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..c7cf8ac 100644
+index 8fabdda..d2296a1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 @@ -11,17 +11,25 @@
@@ -5018,7 +5018,7 @@ index 8fabdda..c7cf8ac 100644
  
  struct linux_ifconf {
  	int lifc_len;
-@@ -88,10 +97,247 @@ const struct known_sysctl sysctls_net[] = {
+@@ -88,10 +97,253 @@ const struct known_sysctl sysctls_net[] = {
  	{ .oid = -1 },
  };
  
@@ -5042,6 +5042,7 @@ index 8fabdda..c7cf8ac 100644
 +
 +static int interface_kind(const char* name) {
 +	static const char* const hidden[] = { "virbr", "br-", "docker", "veth", "vnet", "lxc", "lxd",
++		"ipv6leak", "pvpnksintrf", "nordlynx-", "ztbr",
 +		"cni", "flannel", "kube", "podman", "vmnet", "vboxnet", "zt", "bond", "dummy", "macvtap" };
 +	static const char* const tunnels[] = { "tailscale", "tun", "tap", "wg", "utun", "ppp",
 +		"proton", "nordlynx", "ipsec", "mullvad", "gpd", "cscotun" };
@@ -5222,7 +5223,8 @@ index 8fabdda..c7cf8ac 100644
 +}
 +
 +static void emit_phantoms(void* old, unsigned long* oldlen, char** old_ptr, unsigned long* total_len,
-+		size_t* shown, const char (*mac)[LINUX_IFNAMSIZ], int count, const unsigned char* en0_mac) {
++		size_t* shown, const char (*mac)[LINUX_IFNAMSIZ], int count, const unsigned char* en0_mac,
++		const unsigned char* en1_mac, bool fixed_en1) {
 +	for (size_t p = 0; p < sizeof(mac_phantoms) / sizeof(mac_phantoms[0]); p++) {
 +		const struct mac_phantom* phantom = &mac_phantoms[p];
 +		bool taken = false;
@@ -5255,8 +5257,12 @@ index 8fabdda..c7cf8ac 100644
 +			dl->sdl_nlen = name_len;
 +			dl->sdl_alen = alen;
 +			memcpy(dl->sdl_data, phantom->name, name_len);
-+			if (alen)
-+				phantom_mac(en0_mac, phantom->name, (unsigned char*) LLADDR(dl));
++			if (alen) {
++				if (fixed_en1 && strcmp(phantom->name, "en1") == 0)
++					memcpy(LLADDR(dl), en1_mac, MAC_LENGTH);
++				else
++					phantom_mac(en0_mac, phantom->name, (unsigned char*) LLADDR(dl));
++			}
 +			*old_ptr += ifm_length;
 +		}
 +		*total_len += ifm_length;
@@ -5266,7 +5272,7 @@ index 8fabdda..c7cf8ac 100644
  static int do_iflist(void* old, unsigned long* oldlen) {
  	// we only do IPv4 addresses for now
  	int tmp_sock;
-@@ -107,19 +353,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -107,19 +359,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
  		goto out;
  
@@ -5307,7 +5313,7 @@ index 8fabdda..c7cf8ac 100644
  
  		if (old && *oldlen >= total_len + ifm_length) {
  			struct if_msghdr* ifm = (void*)old_ptr;
-@@ -142,13 +406,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -142,13 +412,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  			dl->sdl_alen = MAC_LENGTH;
  			dl->sdl_slen = 0; // ???
  
@@ -5343,13 +5349,13 @@ index 8fabdda..c7cf8ac 100644
  
  			old_ptr += ifm_length;
  		}
-@@ -188,6 +473,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -188,6 +479,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  		total_len += ifam_length;
  	}
  
 +	if (rename)
 +		emit_phantoms(old, oldlen, &old_ptr, &total_len, &shown, (const char (*)[LINUX_IFNAMSIZ]) mac,
-+			lifc.lifc_len / (int) sizeof(struct linux_ifreq), en0_mac);
++			lifc.lifc_len / (int) sizeof(struct linux_ifreq), en0_mac, en1_mac, fixed_en1);
 +
  	// we succeeded if we got here
  	status = 0;
