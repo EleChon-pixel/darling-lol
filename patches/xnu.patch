@@ -2117,7 +2117,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..b3f5003 100644
+index 206e92e..e0aa5d4 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -6,6 +6,8 @@
@@ -2145,7 +2145,7 @@ index 206e92e..b3f5003 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -197,8 +204,257 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -197,8 +204,265 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  }
  
  
@@ -2191,6 +2191,7 @@ index 206e92e..b3f5003 100644
 +	bool caches;
 +	unsigned int signature;
 +	unsigned int base_mhz;
++	unsigned int max_mhz;
 +	unsigned int max_leaf;
 +	unsigned int brand[12];
 +	struct cpuid_cache cache[4]; /* L1D, L1I, L2, L3; leaf 4 sub-leaf 4 and later: none */
@@ -2286,6 +2287,13 @@ index 206e92e..b3f5003 100644
 +			frequency = frequency * 10 + (unsigned)(*p - '0');
 +		cpuid_identity.base_mhz = (unsigned int)(frequency / 1000000);
 +	}
++	if (darling_identity_lookup(data, "hw.cpufrequency_max", value, sizeof(value)))
++	{
++		unsigned long long fmax = 0;
++		for (const char* p = value; *p >= '0' && *p <= '9'; p++)
++			fmax = fmax * 10 + (unsigned)(*p - '0');
++		cpuid_identity.max_mhz = (unsigned int)(fmax / 1000000);
++	}
 +	if (!darling_identity_lookup(data, "machdep.cpu.brand_string", value, sizeof(value)))
 +		return;
 +	char* brand = (char*) cpuid_identity.brand;
@@ -2366,7 +2374,7 @@ index 206e92e..b3f5003 100644
 +		if (cpuid_identity.base_mhz)
 +		{
 +			a = cpuid_identity.base_mhz;
-+			b = cpuid_identity.base_mhz;
++			b = cpuid_identity.max_mhz ? cpuid_identity.max_mhz : cpuid_identity.base_mhz;
 +			c = 100;
 +		}
 +		break;
@@ -2403,7 +2411,7 @@ index 206e92e..b3f5003 100644
  	am_i_ptraced = true;
  
  	__simple_kprintf("darling_sigexc_self()\n");
-@@ -267,13 +523,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +531,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -2575,7 +2583,7 @@ index 206e92e..b3f5003 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +772,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +780,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -3768,7 +3776,7 @@ index 0000000..de128a9
 +	return total;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..32a4689 100644
+index f273989..7bf349f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,9 @@
@@ -3932,7 +3940,7 @@ index f273989..32a4689 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +184,47 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +184,62 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -3976,11 +3984,26 @@ index f273989..32a4689 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
++		// darling-lol: a configured Mac with a fixed core count (e.g. the Mac mini's
++		// i7-8700B at 6C/12T) reports that count, not the host's, so the CPU story is
++		// self-consistent. Worker pools then size to the model, not the host.
++		unsigned long long logical_count, tpc = 2;
++		if (darling_runtime_identity_u64("cpu.logical_count", &logical_count) &&
++			logical_count >= 1 && logical_count <= 1024)
++		{
++			if (!darling_runtime_identity_u64("cpu.threads_per_core", &tpc) || tpc < 1 || tpc > 8)
++				tpc = 1;
++			hinfo.avail_cpus = hinfo.max_cpus = (integer_t) logical_count;
++			hinfo.logical_cpu = hinfo.logical_cpu_max = (integer_t) logical_count;
++			hinfo.physical_cpu = hinfo.physical_cpu_max = (integer_t)(logical_count / tpc);
++			if (hinfo.physical_cpu == 0)
++				hinfo.physical_cpu = hinfo.physical_cpu_max = 1;
++		}
 +		hinfo.max_mem = 17179869184ULL; // 16 GB, matching the emulated machine
  	}
  
  	return &hinfo;
-@@ -83,6 +237,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +252,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3994,7 +4017,7 @@ index f273989..32a4689 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +330,58 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +345,58 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -4060,7 +4083,7 @@ index f273989..32a4689 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +396,194 @@ sysctl_handler(handle_machine)
+@@ -193,3 +411,194 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4407,7 +4430,7 @@ index bd9cdc2..628ec13 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..e82da53 100644
+index 4319355..6186a48 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -4,6 +4,8 @@
@@ -4487,7 +4510,7 @@ index 4319355..e82da53 100644
  
  	return 0;
  }
-@@ -108,206 +132,277 @@ sysctl_handler(handle_max_basic)
+@@ -108,206 +132,292 @@ sysctl_handler(handle_max_basic)
  
      __cpuid(level, eax, ebx, ecx, edx);
  
@@ -4831,6 +4854,21 @@ index 4319355..e82da53 100644
 +	int infofd = -1;
 +	unsigned long long threads_per_core;
 +
++	/* A configured fixed count (e.g. the Mac mini's 6C/12T) wins over the host. */
++	{
++		unsigned long long logical_count, tpc = 2;
++		if (darling_runtime_identity_u64("cpu.logical_count", &logical_count) &&
++			logical_count >= 1 && logical_count <= 1024)
++		{
++			if (!darling_runtime_identity_u64("cpu.threads_per_core", &tpc) || tpc < 1 || tpc > 8)
++				tpc = 1;
++			core_count = logical_count / tpc;
++			if (core_count == 0)
++				core_count = 1;
++			goto out;
++		}
++	}
++
 +	/* A configured Mac CPU model reports its own SMT ratio over the real
 +	 * logical CPU count, so cores and threads stay consistent with the brand. */
 +	if (topo->detected && !topo->fixed &&
@@ -4913,7 +4951,7 @@ index 4319355..e82da53 100644
  	}
  
  out:
-@@ -319,3 +414,21 @@ out:
+@@ -319,3 +429,26 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -4922,6 +4960,11 @@ index 4319355..e82da53 100644
 +sysctl_handler(handle_thread_count) {
 +	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
 +	size_t thread_count = (topo->detected && !topo->fixed) ? topo->online : 0;
++
++	unsigned long long fixed_logical;
++	if (darling_runtime_identity_u64("cpu.logical_count", &fixed_logical) &&
++		fixed_logical >= 1 && fixed_logical <= 1024)
++		thread_count = (size_t) fixed_logical;
 +
 +	if (thread_count == 0) {
 +		// Detection failed or the opt-out is active: fall back to the same

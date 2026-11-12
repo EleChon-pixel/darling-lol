@@ -90,6 +90,8 @@ HARDWARE_PROFILES = {
         'target_type': 'J174',         # 2018 Mac mini internal codename
         'hostname': 'Mac-mini.local',
         'en0_wired': True,             # a mini's en0 is built-in Ethernet, en1 is Wi-Fi
+        'logical_cpus': 12,            # i7-8700B is 6C/12T; report that, not the host count
+        'cpu_frequency_max': 4600000000,  # 4.6 GHz turbo, CPUID leaf 0x16 EBX
         # A Mac mini has only the integrated GPU; no discrete.
         'gpu_integrated': ('Intel UHD Graphics 630', 0x8086, 0x3E9B),
         # Serial format and the 25 model-config codes are from Acidanthera macserial's
@@ -139,7 +141,8 @@ OPTIONAL_RUNTIME_KEYS = ('machdep.cpu.signature', 'hw.cpufamily', 'hw.cpufrequen
                          'hw.l1icachesize', 'hw.l1dcachesize', 'hw.l2cachesize', 'hw.l3cachesize',
                          'cpu.cpuid_max_leaf', 'kern.uuid', 'net.en0.ether',
                          'hw.disk.serial', 'hw.disk.model', 'hw.disk.size',
-                         'net.en0.wired', 'net.en1.ether')
+                         'net.en0.wired', 'net.en1.ether', 'cpu.logical_count',
+                         'hw.cpufrequency_max')
 ALL_RUNTIME_KEYS = RUNTIME_KEYS + OPTIONAL_RUNTIME_KEYS
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64, 'target-type': 32}
@@ -324,6 +327,10 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
     # A desktop Mac's en0 is built-in Ethernet (not Wi-Fi); it also has a separate
     # Wi-Fi interface (en1) with its own Apple-OUI address, derived from the platform
     # UUID so it is stable and distinct from en0's ROM address.
+    if selected.get('logical_cpus'):
+        values['cpu.logical_count'] = str(selected['logical_cpus'])
+    if selected.get('cpu_frequency_max'):
+        values['hw.cpufrequency_max'] = str(selected['cpu_frequency_max'])
     if selected.get('en0_wired'):
         values['net.en0.wired'] = '1'
         if platform_uuid:
