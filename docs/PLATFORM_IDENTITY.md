@@ -157,6 +157,30 @@ an older `.conf` never edits that source. Symlinks escaping the prefix are
 rejected. To restore the original defaults, remove the override file while the
 prefix is stopped, then restart it.
 
+### The recorded IOKit registry
+
+With the `macmini8,1` profile, iokitd publishes the IOService plane of a real
+Macmini8,1 instead of a handful of entries: the ACPI and PCI tree, SMC, USB, HID,
+storage, network, audio, Thunderbolt and framebuffer entries with their properties
+(about 610 entries). iokitd's own services stand where that Mac has them: the
+platform expert is named after the model, `IOPMrootDomain` is below
+`AppleACPIPlatformExpert`, `IOSurfaceRoot` below `IOResources`, the GPU accelerator
+below `IGPU@2`, and the host's displays below the framebuffers as `display0`.
+
+The data is `src/IOStaticRegistryData.inc` in `patches/iokitd.patch`, made by
+`tools/build-ioregistry.py` from an `ioreg -l -w0` dump. The one in the tree comes
+from the public Macmini8,1 dump in khronokernel/DarwinDumped (macOS 10.14.5). The
+tool keeps nothing that identifies the recorded machine: redacted values, hardware
+addresses, serial numbers, UUIDs, user and Bluetooth names and driver statistics are
+dropped. Addresses and the SSD serial and model are filled in from the prefix's
+runtime identity (`net.en0.ether`, `net.en1.ether`, `hw.disk.*`); `en2` to `en4` get
+the same derived addresses the interface list reports.
+
+Limits: the entries answer lookups and matching but cannot be opened (no SMC keys,
+no HID reports), the shape is that of macOS 10.14 rather than 14, and interfaces the
+guest's interface list lacks (`en5`, `en6`) are left out. Other profiles keep the
+earlier flat layout.
+
 ## Opt-in provisioning
 
 Preview a fresh or repaired identity without writing anything:

@@ -87,7 +87,8 @@ HARDWARE_PROFILES = {
         # board-id verified against AppleDB and Geekbench Macmini8,1 uploads (the
         # OpenCore docs' Mac-7BA5B2D9E42DDD94 is only a sample value, not this model).
         'board_id': 'Mac-7BA5B2DFE22DDD8C',
-        'target_type': 'J174',         # 2018 Mac mini internal codename
+        'target_type': 'Mac',          # what a real Macmini8,1 reports (its board is J174)
+        'disk': ('APPLE SSD AP0512M', 500277792768),  # as a real Macmini8,1 reports its 512 GB SSD
         'hostname': 'Mac-mini.local',
         'en0_wired': True,             # a mini's en0 is built-in Ethernet, en1 is Wi-Fi
         'logical_cpus': 12,            # i7-8700B is 6C/12T; report that, not the host count
@@ -322,8 +323,9 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
         digest = hashlib.sha256(('darling-lol:disk:' + platform_uuid).encode()).digest()
         serial = ''.join(BASE34[byte % len(BASE34)] for byte in digest[:12])
         values['hw.disk.serial'] = serial
-        values['hw.disk.model'] = 'APPLE SSD AP0512Q'
-        values['hw.disk.size'] = '500277790720'
+        model, size = selected.get('disk', ('APPLE SSD AP0512Q', 500277790720))
+        values['hw.disk.model'] = model
+        values['hw.disk.size'] = str(size)
     # A desktop Mac's en0 is built-in Ethernet (not Wi-Fi); it also has a separate
     # Wi-Fi interface (en1) with its own Apple-OUI address, derived from the platform
     # UUID so it is stable and distinct from en0's ROM address.

@@ -39,7 +39,10 @@ class MacAccountDetailTests(unittest.TestCase):
         platform = tool('configure-darling-platform')
         for profile in platform.HARDWARE_PROFILES.values():
             self.assertTrue(profile['board_id'].startswith('Mac-'))
-            self.assertTrue(profile['target_type'].startswith('J'))
+            self.assertTrue(profile['target_type'].startswith('J') or profile['target_type'] == 'Mac')
+        # Recorded from a real Macmini8,1 (ioreg): target-type is "Mac", not the board codename.
+        self.assertEqual(platform.HARDWARE_PROFILES['macmini8,1']['target_type'], 'Mac')
+        self.assertEqual(platform.HARDWARE_PROFILES['macmini8,1']['disk'], ('APPLE SSD AP0512M', 500277792768))
         self.assertEqual(platform.validate({'target-type': 'J152f'}), {'target-type': 'J152f'})
 
     def test_darling_user_records_become_mac_accounts(self):
