@@ -59,6 +59,13 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  [ -n "$discrete_device" ] || discrete_device=7340
  [ -n "$discrete_vendor" ] || discrete_vendor=1002
  [ -n "$(identity gpu.discrete.name)$(identity gpu.integrated.name)" ] && mac_gpu_profile=1
+ # A profile that names only an integrated GPU (a Mac mini) has that one card,
+ # however many the host has.
+ if [ -n "$(identity gpu.integrated.name)" ] && [ -z "$(identity gpu.discrete.name)" ]; then
+  integrated_vendor=$(identity gpu.integrated.vendor | sed 's/^0[xX]//' | tr 'A-F' 'a-f')
+  echo "${integrated_vendor:-8086}|$integrated_device||$integrated_name|builtin"
+  return
+ fi
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")

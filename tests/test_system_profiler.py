@@ -85,6 +85,36 @@ class SystemProfilerTests(unittest.TestCase):
         })
         self.assertIn('      Boot Mode: Normal\n', self.run_profiler('SPSoftwareDataType'))
 
+    def displays_with(self, identity):
+        """SPDisplaysDataType for a host with an NVIDIA and an Intel card and this identity."""
+        root = Path(self.folder.name) / 'root'
+        for card, vendor, device in (('card0', '0x10de', '0x25a2'), ('card1', '0x8086', '0x46a6')):
+            folder = root / 'host/sys/class/drm' / card / 'device'
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / 'vendor').write_text(vendor + '\n')
+            (folder / 'device').write_text(device + '\n')
+        (root / 'identity.conf').write_text(identity)
+        script = root / 'system_profiler'
+        script.write_text(SCRIPT.read_text()
+                          .replace('/Volumes/SystemRoot', str(root / 'host'))
+                          .replace('/private/etc/darling-runtime-identity.conf', str(root / 'identity.conf')))
+        env = {'PATH': '%s:%s' % (self.bin, os.environ['PATH']), 'USER': 'player'}
+        return subprocess.run(['sh', str(script), 'SPDisplaysDataType'], env=env, check=True,
+                              capture_output=True, text=True).stdout
+
+    def test_a_profile_with_one_gpu_reports_one_gpu(self):
+        mini = self.displays_with('hw.model=Macmini8,1\ngpu.integrated.name=Intel UHD Graphics 630\n'
+                                  'gpu.integrated.vendor=0x8086\ngpu.integrated.device=0x3E9B\n')
+        self.assertEqual(mini.count('Chipset Model:'), 1)
+        self.assertIn('Chipset Model: Intel UHD Graphics 630', mini)
+        self.assertIn('Device ID: 0x3e9b', mini)
+        self.assertNotIn('AMD', mini)
+        self.assertNotIn('NVIDIA', mini)
+        laptop = self.displays_with('gpu.integrated.name=Intel UHD Graphics 630\n'
+                                    'gpu.discrete.name=AMD Radeon Pro 5500M\n')
+        self.assertEqual(laptop.count('Chipset Model:'), 2)
+        self.assertIn('Chipset Model: AMD Radeon Pro 5500M', laptop)
+
     def test_listed_and_default_types(self):
         listed = self.run_profiler('-listDataTypes')
         self.assertIn('SPHardwareDataType', listed)
