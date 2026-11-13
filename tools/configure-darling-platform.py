@@ -553,6 +553,7 @@ def save_provisioning(prefix, properties, runtime_root, hardware_profile=None,
         changed = atomic_write(checked_path(prefix, relative), files[relative]) or changed
     for relative, data in mac_account_files(prefix).items():
         changed = atomic_write(checked_path(prefix, relative), data) or changed
+    changed = save_mac_skeleton(prefix) or changed
     return changed
 
 
@@ -593,6 +594,70 @@ def mac_account_files(prefix):
         if updated != text:
             result[relative] = updated.encode()
     return result
+
+
+def _bundle_plist(identifier, name, executable=None, package='APPL', version='14.7'):
+    values = {'CFBundleIdentifier': identifier, 'CFBundleName': name, 'CFBundlePackageType': package,
+              'CFBundleShortVersionString': version, 'CFBundleVersion': version,
+              'CFBundleInfoDictionaryVersion': '6.0'}
+    if executable:
+        values['CFBundleExecutable'] = executable
+    return plistlib.dumps(values, sort_keys=True)
+
+
+# Places every macOS 14 install has and Darling's prefix lacks. They are markers, not
+# software: bundles carry an Info.plist only (no executable, no URL or document
+# handlers, so nothing can launch or select them), volumes are empty directories.
+# Fonts and the dyld shared cache are left out, because an empty file in their place
+# is read by loaders.
+MAC_SKELETON_DIRECTORIES = (
+    'System/Volumes/Data', 'System/Volumes/Preboot/Cryptexes/OS', 'System/Volumes/Preboot/Cryptexes/App',
+    'System/Volumes/VM', 'System/Volumes/Update', 'System/Library/Kernels',
+    'private/var/db/dslocal/nodes/Default',
+)
+MAC_SKELETON_LINKS = {
+    'System/Cryptexes/OS': '../Volumes/Preboot/Cryptexes/OS',
+    'System/Cryptexes/App': '../Volumes/Preboot/Cryptexes/App',
+}
+MAC_SKELETON_FILES = {
+    'System/Library/Extensions/AppleSMC.kext/Contents/Info.plist':
+        _bundle_plist('com.apple.driver.AppleSMC', 'AppleSMC', 'AppleSMC', 'KEXT', '3.1.9'),
+    'System/Library/CoreServices/Finder.app/Contents/Info.plist':
+        _bundle_plist('com.apple.finder', 'Finder', 'Finder'),
+    'System/Library/CoreServices/Dock.app/Contents/Info.plist':
+        _bundle_plist('com.apple.dock', 'Dock', 'Dock'),
+    'System/Applications/Calculator.app/Contents/Info.plist':
+        _bundle_plist('com.apple.calculator', 'Calculator', 'Calculator', version='10.16'),
+    'Applications/Safari.app/Contents/Info.plist':
+        _bundle_plist('com.apple.Safari', 'Safari', 'Safari', version='17.6'),
+    'System/Library/Kernels/kernel': b'',
+    'Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist':
+        _bundle_plist('com.apple.XProtect', 'XProtect', package='BNDL', version='5284'),
+}
+
+
+def save_mac_skeleton(prefix):
+    """Create the missing marker paths; nothing that exists is changed."""
+    changed = False
+    for relative in MAC_SKELETON_DIRECTORIES:
+        path = checked_path(prefix, relative)
+        if not path.exists():
+            path.mkdir(parents=True)
+            changed = True
+    for relative, data in MAC_SKELETON_FILES.items():
+        path = checked_path(prefix, relative)
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            changed = True
+    for relative, target in MAC_SKELETON_LINKS.items():
+        path = Path(prefix).expanduser() / relative
+        checked_path(prefix, str(Path(relative).parent))
+        if not path.is_symlink() and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(target)
+            changed = True
+    return changed
 
 
 def prefix_lock(prefix):

@@ -86,6 +86,9 @@ def filter_host_environment(environ):
         temporary = mac_temp_dir(environ)
         if temporary:
             environ['TMPDIR'] = temporary
+            # darling runs with changed privileges, where the C library removes
+            # TMPDIR from its environment; it reads this name and does not forward it.
+            environ['DARLING_GUEST_TMPDIR'] = temporary
     return removed
 
 

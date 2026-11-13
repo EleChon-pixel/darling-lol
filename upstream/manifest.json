@@ -172,7 +172,10 @@
     "src/LogindSleep.c",
     "src/LogindSleep.h",
     "src/PlatformIdentity.h",
-    "src/PowerSources.mm"
+    "src/PowerSources.mm",
+    "src/IOSMCUserClient.h",
+    "src/IOSMCUserClient.mm",
+    "src/IOSMCKeysData.inc"
    ]
   },
   {
@@ -315,7 +318,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 97,
+   "modified_files": 99,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h",
@@ -336,7 +339,8 @@
     "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c",
     "darling/src/libsystem_kernel/emulation/include/common/host_env.h",
     "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h",
-    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c"
+    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c",
+    "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h"
    ]
   },
   {

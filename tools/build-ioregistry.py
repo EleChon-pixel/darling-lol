@@ -45,7 +45,9 @@ DROP_SUBTREES = {
 # Thunderbolt and other secondary interfaces the guest's interface list has
 # (libsystem_kernel sysctl_net.c mac_phantoms). Their addresses are derived from
 # en0's exactly as there; an interface that list lacks is not published.
-SECONDARY_INTERFACES = {'en2', 'en3', 'en4'}
+SECONDARY_INTERFACES = {'en2', 'en3', 'en4', 'en5'}
+# The link to the T2 chip has the same address on every Mac that has one.
+T2_INTERFACE, T2_ADDRESS = 'en6', bytes.fromhex('acde48001122')
 
 # Entries iokitd already serves itself. The static entry gives the place and
 # name; the live object stands there instead.
@@ -120,7 +122,7 @@ SUPERCLASSES = {
 
 
 INTERFACE_CLASSES = {'IOEthernetInterface', 'IOEthernetAVBInterface', 'IO80211Interface'}
-PUBLISHED_INTERFACES = {'en0', 'en1'} | SECONDARY_INTERFACES
+PUBLISHED_INTERFACES = {'en0', 'en1', T2_INTERFACE} | SECONDARY_INTERFACES
 
 
 def bsd_name(entry):
@@ -288,6 +290,10 @@ def build(entries, model):
             identity['IOMACAddress'] = ['net.en0.ether', 'mac~' + bsd_name(entry)]
             if parent >= 0:  # its controller reports the same address
                 out[parent].setdefault('I', {})['IOMACAddress'] = identity['IOMACAddress']
+        if entry['class'] in INTERFACE_CLASSES and bsd_name(entry) == T2_INTERFACE:
+            record['P']['IOMACAddress'] = T2_ADDRESS
+            if parent >= 0:
+                out[parent]['P']['IOMACAddress'] = T2_ADDRESS
         if identity:
             record['I'] = identity
         stack.append((depth, len(out)))

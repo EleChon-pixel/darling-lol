@@ -13735,7 +13735,7 @@ index 0000000..04d64c1
 +}
 +#endif
 diff --git a/src/startup/darling.c b/src/startup/darling.c
-index a3f27fbf..a61db107 100644
+index a3f27fbf..b1267f0e 100644
 --- a/src/startup/darling.c
 +++ b/src/startup/darling.c
 @@ -220,9 +220,7 @@ int main(int argc, char ** argv)
@@ -13749,7 +13749,37 @@ index a3f27fbf..a61db107 100644
  		free(path);
  
  		argv[argvIndex] = fullPath;
-@@ -638,9 +636,35 @@ void setupShellspawnEnv(int sockfd)
+@@ -585,6 +583,7 @@ void setupShellspawnEnv(int sockfd)
+ 		"PATH",
+ 		"TMPDIR",
+ 		"HOME",
++		"DARLING_GUEST_TMPDIR",
+ 	};
+ 
+ 	char buffer2[4096];
+@@ -596,7 +595,20 @@ void setupShellspawnEnv(int sockfd)
+ 		"/usr/sbin:"
+ 		"/sbin:"
+ 		"/usr/local/bin");
+-	pushShellspawnCommand(sockfd, SHELLSPAWN_SETENV, "TMPDIR=/private/tmp");
++	// darling-lol: a Mac session's TMPDIR is its per-user /var/folders directory. The
++	// launcher creates that directory in the prefix and names it in
++	// DARLING_GUEST_TMPDIR (the C library drops TMPDIR itself from the environment of
++	// a program that runs with changed privileges, as this one does). Without it the
++	// guest gets /private/tmp as before.
++	const char* temporary = getenv("DARLING_GUEST_TMPDIR");
++	if (temporary != NULL && strncmp(temporary, "/var/folders/", 13) == 0
++		&& strlen(temporary) < sizeof(buffer2) - 8 && strstr(temporary, "..") == NULL)
++	{
++		snprintf(buffer2, sizeof(buffer2), "TMPDIR=%s", temporary);
++		pushShellspawnCommand(sockfd, SHELLSPAWN_SETENV, buffer2);
++	}
++	else
++		pushShellspawnCommand(sockfd, SHELLSPAWN_SETENV, "TMPDIR=/private/tmp");
+ 
+ 	const char* login = NULL;
+ 	struct passwd* pw = getpwuid(geteuid());
+@@ -638,9 +650,35 @@ void setupShellspawnEnv(int sockfd)
  
  void setupWorkingDir(int sockfd)
  {
@@ -13788,7 +13818,7 @@ index a3f27fbf..a61db107 100644
  }
  
  void setupIDs(int sockfd)
-@@ -1026,6 +1050,22 @@ void setupPrefix()
+@@ -1026,6 +1064,22 @@ void setupPrefix()
  		exit(1);
  	}
  
@@ -13811,7 +13841,7 @@ index a3f27fbf..a61db107 100644
  	path[plen] = '\0';
  	strcat(path, "/private/etc/passwd");
  	file = fopen(path, "w");
-@@ -1036,10 +1076,11 @@ void setupPrefix()
+@@ -1036,10 +1090,11 @@ void setupPrefix()
  
  	fprintf(file,
  		"root:*:0:0:System Administrator:/var/root:/bin/sh\n"
@@ -13824,7 +13854,7 @@ index a3f27fbf..a61db107 100644
  		passwd_entry->pw_name
  	);
  	fclose(file);
-@@ -1054,10 +1095,11 @@ void setupPrefix()
+@@ -1054,10 +1109,11 @@ void setupPrefix()
  
  	fprintf(file,
  		"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"
