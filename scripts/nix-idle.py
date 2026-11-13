@@ -13,19 +13,26 @@ def crash_handler(process):
     return os.path.basename(executable.decode(errors='replace')) in CRASH_HANDLERS
 
 
-def server_running(prefix):
-    """Whether the prefix marker names a live (not zombie) process."""
+def server_pid(prefix):
+    """PID of the live (not zombie) process the prefix marker names, or 0."""
     try:
         pid = int((prefix / '.init.pid').read_text().strip())
     except FileNotFoundError:
-        return False
+        return 0
     if pid <= 0:
-        return False
+        return 0
     try:
         status = (Path('/proc') / str(pid) / 'status').read_text()
     except (FileNotFoundError, ProcessLookupError):
-        return False
-    return not any(line.startswith('State:') and line.split()[1] == 'Z' for line in status.splitlines())
+        return 0
+    if any(line.startswith('State:') and line.split()[1] == 'Z' for line in status.splitlines()):
+        return 0
+    return pid
+
+
+def server_running(prefix):
+    """Whether the prefix marker names a live (not zombie) process."""
+    return bool(server_pid(prefix))
 
 
 def client_active(prefix, *, processes=None):

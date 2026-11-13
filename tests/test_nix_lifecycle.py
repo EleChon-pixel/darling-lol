@@ -78,9 +78,16 @@ def client_active(prefix, **kwargs):
     return calls < 2
 def server_running(prefix):
     return os.environ.get('SERVER_RUNNING', '1') == '1'
+def server_pid(prefix):
+    try:
+        with open(os.environ['TEST_LOG'] + '.server') as f:
+            return int(f.read())
+    except FileNotFoundError:
+        return 0
 ''')
         (scripts / 'darling-rootless.sh').write_text('''#!/bin/bash
 echo "shutdown:$*" >> "$TEST_LOG"
+rm -f "$TEST_LOG.server"
 # Like darling shutdown, end the client command that the server ran.
 if [ -n "${CLIENT_SLEEP:-}" ]; then
   for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$TEST_LOG.pid" ] && break; sleep 0.2; done
@@ -97,6 +104,12 @@ exit 0
 if [ -n "${CLIENT_SLEEP:-}" ]; then
   echo "$$" > "$TEST_LOG.pid"
   exec sleep "$CLIENT_SLEEP"
+fi
+if [ -n "${CLIENT_STARTING:-}" ]; then
+  # A launcher that is still starting: Darling's shutdown does not end it, and
+  # one of its helpers starts the server again.
+  (sleep 1; echo 4242 > "$TEST_LOG.server"; echo "$BASHPID" > "$TEST_LOG.helper"; exec sleep 60) &
+  sleep 60
 fi
 echo client-finished >> "$TEST_LOG"
 exit "${CLIENT_RC:-0}"
@@ -128,6 +141,23 @@ exit "${CLIENT_RC:-0}"
         self.assertEqual(result.returncode, 128 + 15, result.stderr)
         self.assertIn('Stopping Darling', result.stderr)
         self.assertEqual(self.log.read_text().splitlines(), ['shutdown:shutdown'])
+
+    def test_stop_request_ends_a_starting_command_that_restarted_the_server(self):
+        (self.root / '.stop-request').touch()
+        started = time.monotonic()
+        result = self.run_session(CLIENT_STARTING='1')
+        self.assertLess(time.monotonic() - started, 8, 'waited for the command instead of ending it')
+        self.assertEqual(result.returncode, 128 + signal.SIGKILL, result.stderr)
+        self.assertIn('stopping Darling again', result.stderr)
+        self.assertEqual(self.log.read_text().splitlines(), ['shutdown:shutdown', 'shutdown:shutdown'])
+        helper = int(Path(str(self.log) + '.helper').read_text())
+        for _ in range(20):
+            state = Path(f'/proc/{helper}/stat')
+            if not state.exists() or state.read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                break
+            time.sleep(0.1)
+        else:
+            self.fail('the command\'s helper outlived the session')
 
     def test_interrupt_shuts_down_without_waiting_for_command_or_clients(self):
         session = subprocess.Popen(['bash', str(self.root / 'scripts/nix-session.sh')],
