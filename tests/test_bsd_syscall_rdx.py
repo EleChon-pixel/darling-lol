@@ -51,14 +51,16 @@ class BsdSyscallRdx(unittest.TestCase):
         after = self.x86.split('call\t*%r10', 1)[1].split('Lexit_hook:', 1)[0]
         trace = after.split('cmpl\t$0, ___darling_call_trace_state(%rip)', 1)[1].split('.no_trace:', 1)[0]
         self.assertTrue(trace.lstrip().startswith('je\t\t.no_trace'))
-        # The trace call keeps the result registers and the syscall number, on an even
-        # number of slots, and sees the saved arguments and the caller's stack.
-        for register in ('%rax', '%rdx'):
+        # The trace call leaves every register as the handler left it (the pipe stub
+        # stores through %rdi after the call), on an even number of slots, and sees
+        # the saved arguments and the caller's stack.
+        for register in ('%rax', '%rdx', '%rcx', '%rsi', '%rdi', '%r8', '%r9', '%r10'):
             self.assertEqual(trace.count('pushq\t' + register), 1)
             self.assertEqual(trace.count('popq\t' + register), 1)
-        self.assertEqual(trace.count('pushq\t%r10'), 2)
-        self.assertIn('leaq\t32(%rsp), %rsi', trace)
-        self.assertIn('leaq\t96(%rsp), %rcx', trace)
+        self.assertEqual(trace.count('pushq\t%r11'), 2)
+        self.assertEqual(trace.count('popq\t%r11'), 2)
+        self.assertIn('leaq\t80(%rsp), %rsi', trace)
+        self.assertIn('leaq\t144(%rsp), %rcx', trace)
         self.assertLess(after.index('.no_trace:'), after.index('cmpq\t$2, %r10'))
 
 if __name__ == '__main__':
