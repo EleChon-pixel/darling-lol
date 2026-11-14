@@ -2725,10 +2725,10 @@ index 8c6d5d9..6fd1acf 100644
  }
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
-index a26ae39..82004fb 100644
+index a26ae39..e8b167f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
-@@ -11,13 +11,61 @@ Lentry_hook:
+@@ -11,13 +11,75 @@ Lentry_hook:
  	movq	(%r10,%rax,8), %r10
  	test	%r10, %r10
  	jz		.no_sys
@@ -2759,17 +2759,31 @@ index a26ae39..82004fb 100644
 +	# darling-lol: call trace (helper/misc/call_trace.c), off unless configured.
 +	cmpl	$0, ___darling_call_trace_state(%rip)
 +	je		.no_trace
++	# Every register the handler left stays as it was: the pipe stub, for one,
++	# stores through %rdi after the call (ten slots, same parity).
 +	pushq	%rax
 +	pushq	%rdx
++	pushq	%rcx
++	pushq	%rsi
++	pushq	%rdi
++	pushq	%r8
++	pushq	%r9
 +	pushq	%r10
-+	pushq	%r10
++	pushq	%r11
++	pushq	%r11
 +	movq	%r10, %rdi
-+	leaq	32(%rsp), %rsi
++	leaq	80(%rsp), %rsi
 +	movq	%rax, %rdx
-+	leaq	96(%rsp), %rcx
++	leaq	144(%rsp), %rcx
 +	call	___darling_call_trace_bsd
++	popq	%r11
++	popq	%r11
 +	popq	%r10
-+	popq	%r10
++	popq	%r9
++	popq	%r8
++	popq	%rdi
++	popq	%rsi
++	popq	%rcx
 +	popq	%rdx
 +	popq	%rax
 +.no_trace:
@@ -11844,10 +11858,10 @@ index e1a2b35..809d5f9 100644
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
-index b02d447..6bbcc25 100644
+index b02d447..077bcb2 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
-@@ -15,13 +15,57 @@ Lentry_hook:
+@@ -15,13 +15,70 @@ Lentry_hook:
  	movq	(%r10,%rax,8), %r10
  	test	%r10, %r10
  	jz		.no_sys
@@ -11893,13 +11907,26 @@ index b02d447..6bbcc25 100644
 +	popq	%r10
 +	cmpl	$0, ___darling_call_trace_state(%rip)
 +	je		.no_trace_exit
++	# every register the handler left stays as it was (eight slots)
 +	pushq	%rax
 +	pushq	%rdx
++	pushq	%rcx
++	pushq	%rsi
++	pushq	%rdi
++	pushq	%r8
++	pushq	%r9
++	pushq	%r11
 +	movq	%r10, %rdi
-+	leaq	16(%rsp), %rsi
++	leaq	64(%rsp), %rsi
 +	movq	%rax, %rdx
-+	leaq	80(%rsp), %rcx
++	leaq	128(%rsp), %rcx
 +	call	___darling_call_trace_mach
++	popq	%r11
++	popq	%r9
++	popq	%r8
++	popq	%rdi
++	popq	%rsi
++	popq	%rcx
 +	popq	%rdx
 +	popq	%rax
 +.no_trace_exit:
