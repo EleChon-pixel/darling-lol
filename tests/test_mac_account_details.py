@@ -58,9 +58,10 @@ class MacAccountDetailTests(unittest.TestCase):
             files = platform.mac_account_files(Path(folder))
             passwd = files['private/etc/passwd'].decode().splitlines()
             self.assertEqual(passwd[0], 'root:*:0:0:System Administrator:/var/root:/bin/sh')
-            self.assertEqual(passwd[1], 'nobody-here:*:1000:1000:nobody-here:/Users/nobody-here:/bin/zsh')
+            # A Mac's first account: uid 501, primary group staff.
+            self.assertEqual(passwd[1], 'nobody-here:*:501:20:nobody-here:/Users/nobody-here:/bin/zsh')
             master = files['private/etc/master.passwd'].decode().splitlines()
-            self.assertEqual(master[1], 'nobody-here:*:1000:1000::0:0:nobody-here:/Users/nobody-here:/bin/zsh')
+            self.assertEqual(master[1], 'nobody-here:*:501:20::0:0:nobody-here:/Users/nobody-here:/bin/zsh')
             for relative, data in files.items():
                 (Path(folder) / relative).write_bytes(data)
             self.assertEqual(platform.mac_account_files(Path(folder)), {})
@@ -78,13 +79,15 @@ class MacAccountDetailTests(unittest.TestCase):
                                        '_trustd:*:282:_trustd\n')
             files = platform.mac_account_files(Path(folder))
             lines = files['private/etc/group'].decode().splitlines()
-            self.assertEqual(lines[:3], ['wheel:*:0:root,nobody-here', 'nobody-here:*:1000:nobody-here',
-                                         '_trustd:*:282:_trustd'])
+            # Darling's wheel and per-user groups no longer list the account; a Mac's do.
+            self.assertEqual(lines[:3], ['wheel:*:0:root', 'nobody-here:*:1000:', '_trustd:*:282:_trustd'])
             self.assertEqual(sum(line.startswith('wheel:') for line in lines), 1)
             self.assertIn('staff:*:20:root,nobody-here', lines)
             self.assertIn('admin:*:80:root,nobody-here', lines)
-            self.assertIn('everyone:*:12:', lines)
+            self.assertIn('everyone:*:12:nobody-here', lines)
+            self.assertIn('_developer:*:204:nobody-here', lines)
             self.assertIn('nobody:*:-2:', lines)
+            self.assertIn('certusers:*:29:root', lines)
             for relative, data in files.items():
                 (Path(folder) / relative).write_bytes(data)
             self.assertEqual(platform.mac_account_files(Path(folder)), {})

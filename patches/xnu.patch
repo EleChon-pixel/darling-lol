@@ -3186,10 +3186,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..850b6c0
+index 0000000..db4f377
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,954 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3398,6 +3398,15 @@ index 0000000..850b6c0
 +		n = next_component(&at);
 +		return n > 0 && darling_file_name(at);
 +	}
++#ifndef VARIANT_DYLD
++	/* Darling's own libraries (Metal's libindium, xtrace). dyld, built separately,
++	 * still loads them by path; the application's own lookups do not find them. */
++	{
++		const char* at = p;
++		if (component_is(&at, "usr") && component_is(&at, "lib") && component_is(&at, "darling"))
++			return true;
++	}
++#endif
 +	if (component_is(&p, "usr") && component_is(&p, "libexec") && component_is(&p, "darling"))
 +		return true;
 +	return false;
@@ -3444,6 +3453,68 @@ index 0000000..850b6c0
 +#define HIDE(dfd, path, follow) do { if (darling_guest_path_hidden((dfd), (path), (follow))) return -ENOENT; } while (0)
 +
 +/*
++ * Device nodes a Mac's devfs has and the host's /dev lacks: the internal SSD and the
++ * APFS container its volumes are on (statfs reports them as /dev/disk1sN), packet
++ * filters, the kernel log and autofs. On a Mac none is accessible to a user (root, and
++ * operator for the disks), so here they exist for stat and access and refuse to open.
++ * Device numbers are plausible, not recorded. Character arrays: dyld links this file.
++ */
++struct mac_device
++{
++	char name[24];
++	unsigned short mode;
++	unsigned short gid;
++	unsigned int rdev; /* major << 24 | minor */
++};
++#define MAC_BLK(minor) 0060640, 5, ((1u << 24) | (minor))
++#define MAC_CHR(major, minor) 0020600, 0, (((unsigned) (major) << 24) | (minor))
++static const struct mac_device mac_devices[] = {
++	{ "disk0", MAC_BLK(0) }, { "disk0s1", MAC_BLK(1) }, { "disk0s2", MAC_BLK(2) },
++	{ "disk1", MAC_BLK(3) }, { "disk1s1", MAC_BLK(4) }, { "disk1s2", MAC_BLK(5) },
++	{ "disk1s3", MAC_BLK(6) }, { "disk1s4", MAC_BLK(7) }, { "disk1s5", MAC_BLK(8) },
++	{ "disk1s6", MAC_BLK(9) },
++	{ "bpf0", MAC_CHR(23, 0) }, { "bpf1", MAC_CHR(23, 1) }, { "bpf2", MAC_CHR(23, 2) },
++	{ "bpf3", MAC_CHR(23, 3) },
++	{ "klog", 0020400, 0, (6u << 24) },
++	{ "autofs", MAC_CHR(24, 0) }, { "autofs_control", MAC_CHR(25, 0) },
++	{ "autofs_homedirmounter", MAC_CHR(26, 0) }, { "autofs_notrigger", MAC_CHR(27, 0) },
++	{ "autofs_nowait", MAC_CHR(28, 0) },
++};
++
++static const struct mac_device* mac_device_of(const char* path)
++{
++	const char* p = path;
++	const char* at;
++	const char* rest;
++	size_t n;
++
++	if (path == NULL || path[0] != '/' || !component_is(&p, "dev") || !darling_guest_view_active())
++		return NULL;
++	at = p;
++	n = next_component(&at);
++	rest = at + n;
++	if (n == 0 || next_component(&rest) != 0)
++		return NULL;
++	for (size_t i = 0; i < sizeof(mac_devices) / sizeof(mac_devices[0]); i++)
++	{
++		if (strlen(mac_devices[i].name) == n && strncmp(at, mac_devices[i].name, n) == 0)
++			return &mac_devices[i];
++	}
++	return NULL;
++}
++
++/* A node's attributes: those of /dev/null (same file system and times) with its own. */
++#define MAC_DEVICE_STAT(st, device, statfn, fill) do { \
++	long rv_ = statfn("/dev/null", (st)); \
++	if (rv_ != 0) \
++		return rv_; \
++	fill((st), (unsigned) ((device) - mac_devices), (device)->mode, (device)->gid, (device)->rdev); \
++	return 0; \
++} while (0)
++#define MAC_DEVICE_ACCESS(device, amode) do { if (device) return ((amode) & 7) ? -EACCES : 0; } while (0)
++#define MAC_DEVICE_OPEN(path) do { if (mac_device_of(path)) return -EACCES; } while (0)
++
++/*
 + * Darling's compositor (cocotron X11Window, CALayer) finds the frame slots other
 + * processes publish by listing /dev/shm from inside the application. A directory open
 + * of exactly /dev/shm is therefore allowed, and its listing shows only Darling's own
@@ -3464,6 +3535,7 @@ index 0000000..850b6c0
 +
 +long guarded_open(const char* path, int flags, unsigned int mode)
 +{
++	MAC_DEVICE_OPEN(path);
 +	if (!darling_shm_directory(path, flags))
 +		HIDE(AT_CWD_LINUX, path, true);
 +	return sys_open(path, flags, mode);
@@ -3471,6 +3543,7 @@ index 0000000..850b6c0
 +
 +long guarded_open_nocancel(const char* path, int flags, unsigned int mode)
 +{
++	MAC_DEVICE_OPEN(path);
 +	if (!darling_shm_directory(path, flags))
 +		HIDE(AT_CWD_LINUX, path, true);
 +	return sys_open_nocancel(path, flags, mode);
@@ -3478,12 +3551,14 @@ index 0000000..850b6c0
 +
 +long guarded_openat(int fd, const char* path, int flags, unsigned int mode)
 +{
++	MAC_DEVICE_OPEN(path);
 +	HIDE(atfd(fd), path, true);
 +	return sys_openat(fd, path, flags, mode);
 +}
 +
 +long guarded_openat_nocancel(int fd, const char* path, int flags, unsigned int mode)
 +{
++	MAC_DEVICE_OPEN(path);
 +	HIDE(atfd(fd), path, true);
 +	return sys_openat_nocancel(fd, path, flags, mode);
 +}
@@ -3530,12 +3605,18 @@ index 0000000..850b6c0
 +
 +long guarded_stat(const char* path, struct stat* st)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat, stat_mac_device);
 +	HIDE(AT_CWD_LINUX, path, true);
 +	return sys_stat(path, st);
 +}
 +
 +long guarded_lstat(const char* path, struct stat* st)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat, stat_mac_device);
 +	HIDE(AT_CWD_LINUX, path, false);
 +	if (link_into_host(BSD_AT_FDCWD, path))
 +		return sys_stat(path, st);
@@ -3544,12 +3625,18 @@ index 0000000..850b6c0
 +
 +long guarded_stat64(const char* path, struct stat64* st)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat64, stat64_mac_device);
 +	HIDE(AT_CWD_LINUX, path, true);
 +	return sys_stat64(path, st);
 +}
 +
 +long guarded_lstat64(const char* path, struct stat64* st)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat64, stat64_mac_device);
 +	HIDE(AT_CWD_LINUX, path, false);
 +	if (link_into_host(BSD_AT_FDCWD, path))
 +		return sys_stat64(path, st);
@@ -3558,12 +3645,26 @@ index 0000000..850b6c0
 +
 +long guarded_stat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++	{
++		if (xsec_size != NULL)
++			*xsec_size = 0;
++		MAC_DEVICE_STAT(st, device, sys_stat64, stat64_mac_device);
++	}
 +	HIDE(AT_CWD_LINUX, path, true);
 +	return sys_stat64_extended(path, st, xsec, xsec_size);
 +}
 +
 +long guarded_lstat64_extended(const char* path, struct stat64* st, void* xsec, unsigned long* xsec_size)
 +{
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++	{
++		if (xsec_size != NULL)
++			*xsec_size = 0;
++		MAC_DEVICE_STAT(st, device, sys_stat64, stat64_mac_device);
++	}
 +	HIDE(AT_CWD_LINUX, path, false);
 +	if (link_into_host(BSD_AT_FDCWD, path))
 +		return sys_stat64_extended(path, st, xsec, xsec_size);
@@ -3573,6 +3674,9 @@ index 0000000..850b6c0
 +long guarded_fstatat(int fd, const char* path, struct stat* st, int flag)
 +{
 +	bool follow = !(flag & BSD_AT_SYMLINK_NOFOLLOW);
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat, stat_mac_device);
 +	HIDE(atfd(fd), path, follow);
 +	if (!follow && link_into_host(fd, path))
 +		flag &= ~BSD_AT_SYMLINK_NOFOLLOW;
@@ -3582,6 +3686,9 @@ index 0000000..850b6c0
 +long guarded_fstatat64(int fd, const char* path, struct stat64* st, int flag)
 +{
 +	bool follow = !(flag & BSD_AT_SYMLINK_NOFOLLOW);
++	const struct mac_device* device = mac_device_of(path);
++	if (device)
++		MAC_DEVICE_STAT(st, device, sys_stat64, stat64_mac_device);
 +	HIDE(atfd(fd), path, follow);
 +	if (!follow && link_into_host(fd, path))
 +		flag &= ~BSD_AT_SYMLINK_NOFOLLOW;
@@ -3590,12 +3697,14 @@ index 0000000..850b6c0
 +
 +long guarded_access(const char* path, int amode)
 +{
++	MAC_DEVICE_ACCESS(mac_device_of(path), amode);
 +	HIDE(AT_CWD_LINUX, path, true);
 +	return sys_access(path, amode);
 +}
 +
 +long guarded_faccessat(int fd, const char* path, int amode, int flag)
 +{
++	MAC_DEVICE_ACCESS(mac_device_of(path), amode);
 +	HIDE(atfd(fd), path, !(flag & BSD_AT_SYMLINK_NOFOLLOW));
 +	return sys_faccessat(fd, path, amode, flag);
 +}
@@ -3950,7 +4059,7 @@ index 0000000..850b6c0
 +		return strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && !darling_file_name(name);
 +	if (strcmp(directory, "/private/etc") == 0 || strcmp(directory, "/etc") == 0)
 +		return darling_file_name(name);
-+	/* /usr/lib/darling stays reachable by path (Metal links libindium from it). */
++	/* /usr/lib/darling: dyld still loads Darling's libraries from it (see lexically_hidden). */
 +	if (strcmp(directory, "/usr/libexec") == 0 || strcmp(directory, "/usr/lib") == 0)
 +		return strcmp(name, "darling") == 0;
 +	return false;
@@ -6546,10 +6655,10 @@ index e808529..bd663f6 100644
  	if (ret < 0)
  		ret = -errno;
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..791899c 100644
+index f1ce3d3..3a454a8 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,405 @@
+@@ -1,38 +1,436 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
@@ -6567,6 +6676,7 @@ index f1ce3d3..791899c 100644
  
  #include <darling/emulation/conversion/duct_errno.h>
 +#include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
++#include <darling/emulation/linux_premigration/vchroot_expand.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/unistd/geteuid.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
@@ -6615,6 +6725,34 @@ index f1ce3d3..791899c 100644
 +	if (ret > 0)
 +		return -ret;
 +	return ret;
++}
++
++/*
++ * darling-lol: what CS_OPS_STATUS reports. Darling signs its own system binaries ad hoc;
++ * on a Mac the binaries in the system locations are platform binaries signed by Apple.
++ * A validly signed executable without a team ID that runs from one of those locations is
++ * reported that way. Only the report changes: library validation and every other
++ * decision keep using the recorded flags.
++ */
++static int system_location(const char* path) {
++	return strncmp(path, "/sbin/", 6) == 0 || strncmp(path, "/bin/", 5) == 0 ||
++	    strncmp(path, "/usr/bin/", 9) == 0 || strncmp(path, "/usr/sbin/", 10) == 0 ||
++	    strncmp(path, "/usr/libexec/", 13) == 0 || strncmp(path, "/System/", 8) == 0;
++}
++
++static uint32_t reported_flags(int pid, const struct dc_cs_state* state) {
++	struct vchroot_unexpand_args exe;
++	uint64_t length = 0;
++	uint32_t flags = state->flags;
++
++	if (!(flags & DC_CS_VALID) || !(flags & DC_CS_ADHOC) || state->teamid_len != 0)
++		return flags;
++	if (dserver_rpc_get_executable_path(pid, exe.path, sizeof(exe.path), &length) != 0 || length == 0)
++		return flags;
++	exe.path[sizeof(exe.path) - 1] = '\0';
++	if (vchroot_unexpand(&exe) != 0 || !system_location(exe.path))
++		return flags;
++	return (flags | DC_CS_PLATFORM_BINARY) & ~DC_CS_ADHOC;
 +}
 +
 +static int state_for(int pid, int self, struct dc_cs_state* state) {
@@ -6782,12 +6920,19 @@ index f1ce3d3..791899c 100644
 +
 +	case CS_OPS_STATUS:
 +		if (useraddr != NULL) {
++			uint32_t flags;
 +			if (usersize < sizeof(uint32_t))
 +				return -ERANGE;
-+			memcpy(useraddr, &state.flags, sizeof(state.flags));
++			flags = reported_flags(pid, &state);
++			memcpy(useraddr, &flags, sizeof(flags));
 +		}
 +		return 0;
-+
+ 
+-		case CS_OPS_BLOB:
+-		case CS_OPS_ENTITLEMENTS_BLOB:
+-		case CS_OPS_IDENTITY: {
+-			memset(useraddr, 0, usersize);
+-		} break;
 +	case CS_OPS_CDHASH:
 +		if (usersize != DC_CS_CDHASH_LEN || state.cdhash_len != DC_CS_CDHASH_LEN)
 +			return -EINVAL;
@@ -6796,10 +6941,9 @@ index f1ce3d3..791899c 100644
 +		memcpy(useraddr, state.cdhash, DC_CS_CDHASH_LEN);
 +		return 0;
  
--		case CS_OPS_BLOB:
--		case CS_OPS_ENTITLEMENTS_BLOB:
--		case CS_OPS_IDENTITY: {
--			memset(useraddr, 0, usersize);
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
 -		} break;
 +	case CS_OPS_PIDOFFSET:
 +		if (useraddr == NULL)
@@ -6808,11 +6952,7 @@ index f1ce3d3..791899c 100644
 +			return -ERANGE;
 +		memcpy(useraddr, &state.image_offset, sizeof(state.image_offset));
 +		return 0;
- 
--		// all other operations are completely unsupported
--		default: {
--			ret = -ENOSYS;
--		} break;
++
 +	case CS_OPS_PIDPATH:
 +		return copy_identity(state.image_path, strlen(state.image_path), useraddr, usersize);
 +
@@ -7184,7 +7324,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..5f713a3 100644
+index c2f70fb..e186013 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -27,6 +27,8 @@
@@ -7456,7 +7596,7 @@ index c2f70fb..5f713a3 100644
  
  	// process state
  	READELEM();
-@@ -827,3 +1043,241 @@ bail:
+@@ -827,3 +1043,245 @@ bail:
  	close_internal(fd);
  	return count * sizeof(uint64_t);
  }
@@ -7554,6 +7694,10 @@ index c2f70fb..5f713a3 100644
 +		for (; *p >= '0' && *p <= '9'; p++)
 +			*uid = *uid * 10 + (*p - '0');
 +	}
++	/* Guest processes run as the host user; the guest knows that user by its virtual
++	 * uid (the account record's, e.g. 501), as getuid() reports it. */
++	if (*uid == (long) LINUX_SYSCALL0(__NR_getuid))
++		*uid = sys_getuid();
 +	return true;
 +}
 +
@@ -13876,3 +14020,47 @@ index 6bd386b..3471ba3 100644
 +	}
 +	return count;
  }
+diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/stat/common.h b/darling/src/libsystem_kernel/emulation/include/conversion/stat/common.h
+index e79d496..e0dcb3c 100644
+--- a/darling/src/libsystem_kernel/emulation/include/conversion/stat/common.h
++++ b/darling/src/libsystem_kernel/emulation/include/conversion/stat/common.h
+@@ -149,4 +149,9 @@ void stat_linux_to_bsd64(const struct linux_stat* lstat, struct stat64* stat);
+ void statfs_linux_to_bsd(const struct linux_statfs64* lstat, struct bsd_statfs* stat);
+ void statfs_linux_to_bsd64(const struct linux_statfs64* lstat, struct bsd_statfs64* stat);
+ 
++struct stat;
++struct stat64;
++void stat_mac_device(struct stat* st, unsigned int index, unsigned int mode, unsigned int gid, unsigned int rdev);
++void stat64_mac_device(struct stat64* st, unsigned int index, unsigned int mode, unsigned int gid, unsigned int rdev);
++
+ #endif // LINUX_STAT_COMMON_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/conversion/stat/common.c b/darling/src/libsystem_kernel/emulation/src/conversion/stat/common.c
+index 4d1f437..bdcd5bc 100644
+--- a/darling/src/libsystem_kernel/emulation/src/conversion/stat/common.c
++++ b/darling/src/libsystem_kernel/emulation/src/conversion/stat/common.c
+@@ -75,3 +75,25 @@ void statfs_linux_to_bsd64(const struct linux_statfs64* lstat, struct bsd_statfs
+ 	stat->f_fsid = lstat->f_fsid;
+ 	stat->f_flags = lstat->f_flags; /* FIXME: convert flags */
+ }
++
++/* darling-lol: a Mac device node's attributes over those of /dev/null (guest_view.c). */
++#define MAC_DEVICE_FIELDS(st) do { \
++	(st)->st_ino += 1 + index; \
++	(st)->st_mode = mode; \
++	(st)->st_nlink = 1; \
++	(st)->st_uid = 0; \
++	(st)->st_gid = gid; \
++	(st)->st_rdev = rdev; \
++	(st)->st_size = 0; \
++	(st)->st_blocks = 0; \
++} while (0)
++
++void stat_mac_device(struct stat* st, unsigned int index, unsigned int mode, unsigned int gid, unsigned int rdev)
++{
++	MAC_DEVICE_FIELDS(st);
++}
++
++void stat64_mac_device(struct stat64* st, unsigned int index, unsigned int mode, unsigned int gid, unsigned int rdev)
++{
++	MAC_DEVICE_FIELDS(st);
++}

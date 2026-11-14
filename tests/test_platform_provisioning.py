@@ -86,7 +86,7 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(properties['manufacturer'], 'Apple Inc.')
         runtime = platform.load_runtime_identity(
             self.prefix / 'private/etc/darling-runtime-identity.conf')
-        self.assertRegex(runtime.pop('hw.disk.serial'), r'^[0-9A-Z]{12}$')
+        self.assertRegex(runtime.pop('hw.disk.serial'), r'^C07[089][0-9]{6}[0-9A-HJ-NP-Z]{7}$')
         self.assertEqual(runtime, {
             'hw.model': 'iMac20,1',
             'machdep.cpu.vendor': 'GenuineIntel',

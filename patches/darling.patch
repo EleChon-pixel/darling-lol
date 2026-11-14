@@ -8981,10 +8981,18 @@ index 6fa2d088..c41af679 100644
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
  int sandbox_issue_fs_rw_extension(const char *path, char **ext_token);
 diff --git a/src/shellspawn/shellspawn.c b/src/shellspawn/shellspawn.c
-index f5ba615..53d04ad 100644
+index f5ba615b..3165c96b 100644
 --- a/src/shellspawn/shellspawn.c
 +++ b/src/shellspawn/shellspawn.c
-@@ -34,9 +34,10 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -22,6 +22,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/stat.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <grp.h>
+ #include <fcntl.h>
+ #include <stdbool.h>
+ #include <string.h>
+@@ -34,9 +35,10 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include <sys/ioctl.h>
  #include <signal.h>
  #include "shellspawn.h"
@@ -8996,7 +9004,7 @@ index f5ba615..53d04ad 100644
  
  int g_serverSocket = -1;
  struct sigaction sigchld_oldaction;
-@@ -50,6 +51,17 @@ void reapAll(void);
+@@ -50,6 +52,17 @@ void reapAll(void);
  
  int main(int argc, const char** argv)
  {
@@ -9014,7 +9022,7 @@ index f5ba615..53d04ad 100644
  	// shellspawn (daemon) --fork()--> shellspawn (child) --fork()--> exec /bin/bash
  	// in order to read the exit status of the shell process,
  	// we have to allow it to become a zombie, therefore we need to
-@@ -125,7 +137,7 @@ void spawnShell(int fd)
+@@ -125,7 +138,7 @@ void spawnShell(int fd)
  {
  	pid_t shell_pid = -1;
  	int shellfd[3] = { -1, -1, -1 };
@@ -9023,7 +9031,7 @@ index f5ba615..53d04ad 100644
  	int rv;
  	struct pollfd pfd[2];
  	char** argv = NULL;
-@@ -143,6 +155,14 @@ void spawnShell(int fd)
+@@ -143,6 +156,14 @@ void spawnShell(int fd)
  
  	char* alloc_exec = NULL;
  
@@ -9038,7 +9046,23 @@ index f5ba615..53d04ad 100644
  	// Read commands from client
  	while (read_cmds)
  	{
-@@ -262,25 +282,20 @@ void spawnShell(int fd)
+@@ -241,6 +262,15 @@ void spawnShell(int fd)
+ 					break;
+ 				}
+ 
++				/* darling-lol: an optional group count and list follow the ids (darling.c). */
++				if (cmd.data_length >= 3 * sizeof(int) && ids[2] > 0 && ids[2] <= 16 &&
++					cmd.data_length >= (3 + ids[2]) * sizeof(int))
++				{
++					gid_t groups[16];
++					for (int i = 0; i < ids[2]; i++)
++						groups[i] = (gid_t) ids[3 + i];
++					setgroups(ids[2], groups);
++				}
+ 				setuid(ids[0]);
+ 				setgid(ids[1]);
+ 				free(param);
+@@ -262,25 +292,20 @@ void spawnShell(int fd)
  	argv = (char**) realloc(argv, sizeof(char*) * (argc + 1));
  	argv[argc] = NULL;
  
@@ -9069,7 +9093,7 @@ index f5ba615..53d04ad 100644
  		close(fd);
  
  		fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
-@@ -296,6 +311,7 @@ void spawnShell(int fd)
+@@ -296,6 +321,7 @@ void spawnShell(int fd)
  		exit(EXIT_FAILURE);
  	}
  
@@ -9077,7 +9101,7 @@ index f5ba615..53d04ad 100644
  	if (alloc_exec)
  	{
  		free(alloc_exec);
-@@ -304,12 +320,14 @@ void spawnShell(int fd)
+@@ -304,12 +330,14 @@ void spawnShell(int fd)
  
  	// Check that exec succeeded
  	close(pipefd[1]); // close the write end
@@ -9092,7 +9116,7 @@ index f5ba615..53d04ad 100644
  
  	// Now we start passing signals
  	// and check for child process exit
-@@ -372,7 +390,7 @@ void spawnShell(int fd)
+@@ -372,7 +400,7 @@ void spawnShell(int fd)
  
  					if (darwin_signal != 0)
  					{
@@ -9101,7 +9125,7 @@ index f5ba615..53d04ad 100644
  						if (fg_pid != -1)
  						{
  							if (DBG) printf("fg_pid = %d\n", fg_pid);
-@@ -394,11 +412,7 @@ void spawnShell(int fd)
+@@ -394,11 +422,7 @@ void spawnShell(int fd)
  	kill(shell_pid, SIGKILL);
  
  	// Close shell fds
@@ -9114,7 +9138,7 @@ index f5ba615..53d04ad 100644
  
  	// Reap the child
  	int wstatus;
-@@ -415,13 +429,11 @@ void spawnShell(int fd)
+@@ -415,13 +439,11 @@ void spawnShell(int fd)
  	reapAll();
  	return;
  err:
@@ -13735,7 +13759,7 @@ index 0000000..04d64c1
 +}
 +#endif
 diff --git a/src/startup/darling.c b/src/startup/darling.c
-index a3f27fbf..b1267f0e 100644
+index a3f27fbf..4df50ecd 100644
 --- a/src/startup/darling.c
 +++ b/src/startup/darling.c
 @@ -220,9 +220,7 @@ int main(int argc, char ** argv)
@@ -13779,7 +13803,7 @@ index a3f27fbf..b1267f0e 100644
  
  	const char* login = NULL;
  	struct passwd* pw = getpwuid(geteuid());
-@@ -638,9 +650,35 @@ void setupShellspawnEnv(int sockfd)
+@@ -638,15 +650,150 @@ void setupShellspawnEnv(int sockfd)
  
  void setupWorkingDir(int sockfd)
  {
@@ -13815,10 +13839,127 @@ index a3f27fbf..b1267f0e 100644
 +	}
 +	free(prefixPath);
 +	return result;
++}
++
++/* darling-lol: read a small guest account file of the prefix (no symlinks followed). */
++static char* readPrefixAccountFile(const char* relative)
++{
++	char path[4096];
++	char* text;
++	ssize_t got;
++	size_t length = 0;
++	int fd;
++
++	if (snprintf(path, sizeof(path), "%s/private/etc/%s", prefix, relative) >= (int) sizeof(path))
++		return NULL;
++	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++	if (fd < 0)
++		return NULL;
++	text = malloc(65536);
++	if (text != NULL)
++	{
++		while (length < 65535 && (got = read(fd, text + length, 65535 - length)) > 0)
++			length += got;
++		text[length] = '\0';
++	}
++	close(fd);
++	return text;
++}
++
++/* darling-lol: field `index` (0-based) of a colon-separated line, copied into `out`. */
++static bool accountField(const char* line, int index, char* out, size_t size)
++{
++	size_t n = 0;
++
++	for (int i = 0; i < index; i++)
++	{
++		line = strchr(line, ':');
++		if (line == NULL)
++			return false;
++		line++;
++	}
++	while (line[n] && line[n] != ':' && line[n] != '\n' && n < size - 1)
++	{
++		out[n] = line[n];
++		n++;
++	}
++	out[n] = '\0';
++	return true;
++}
++
++static bool accountNumber(const char* text, int* value)
++{
++	char* end;
++	long parsed = strtol(text, &end, 10);
++
++	if (end == text || *end != '\0' || parsed < -2 || parsed > 0x7fffffffL)
++		return false;
++	*value = (int) parsed;
++	return true;
  }
  
++/*
++ * darling-lol: the guest's processes run with the ids the guest's own account record
++ * gives (a Mac's first account is uid 501, group staff), and with the groups the guest's
++ * /etc/group lists the account in. These are Darling's virtual credentials only: the
++ * processes keep running as the host user, and files keep their host owner. Without a
++ * matching record the host ids are used, as before.
++ */
  void setupIDs(int sockfd)
-@@ -1026,6 +1064,22 @@ void setupPrefix()
+ {
+-	int ids[2] = { g_originalUid, g_originalGid };
+-	pushShellspawnCommandData(sockfd, SHELLSPAWN_SETUIDGID, ids, sizeof(ids));
++	int ids[2 + 1 + 16] = { g_originalUid, g_originalGid, 0 };
++	int count = 0;
++	struct passwd* host = getpwuid(g_originalUid);
++	char* text;
++
++	if (host != NULL && (text = readPrefixAccountFile("passwd")) != NULL)
++	{
++		for (char* line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL)
++		{
++			char name[256], uid[32], gid[32];
++			int u, g;
++
++			if (accountField(line, 0, name, sizeof(name)) && strcmp(name, host->pw_name) == 0 &&
++				accountField(line, 2, uid, sizeof(uid)) && accountField(line, 3, gid, sizeof(gid)) &&
++				accountNumber(uid, &u) && accountNumber(gid, &g) && u >= 0 && g >= 0)
++			{
++				ids[0] = u;
++				ids[1] = g;
++				break;
++			}
++		}
++		free(text);
++	}
++
++	ids[3 + count++] = ids[1];
++	if (host != NULL && (text = readPrefixAccountFile("group")) != NULL)
++	{
++		for (char* line = text; line && *line && count < 16; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL)
++		{
++			char members[1024], gid[32];
++			int g;
++			bool member = false;
++
++			if (*line == '#' || !accountField(line, 2, gid, sizeof(gid)) || !accountNumber(gid, &g) || g < 0 ||
++				!accountField(line, 3, members, sizeof(members)))
++				continue;
++			for (char* m = strtok(members, ","); m != NULL; m = strtok(NULL, ","))
++				member |= strcmp(m, host->pw_name) == 0;
++			for (int i = 0; i < count && member; i++)
++				member = ids[3 + i] != g;
++			if (member)
++				ids[3 + count++] = g;
++		}
++		free(text);
++	}
++	ids[2] = count;
++	pushShellspawnCommandData(sockfd, SHELLSPAWN_SETUIDGID, ids, sizeof(int) * (3 + count));
+ }
+ 
+ void setupFDs(int fds[3], int* master)
+@@ -1026,6 +1173,22 @@ void setupPrefix()
  		exit(1);
  	}
  
@@ -13841,7 +13982,7 @@ index a3f27fbf..b1267f0e 100644
  	path[plen] = '\0';
  	strcat(path, "/private/etc/passwd");
  	file = fopen(path, "w");
-@@ -1036,10 +1090,11 @@ void setupPrefix()
+@@ -1036,10 +1199,11 @@ void setupPrefix()
  
  	fprintf(file,
  		"root:*:0:0:System Administrator:/var/root:/bin/sh\n"
@@ -13854,7 +13995,7 @@ index a3f27fbf..b1267f0e 100644
  		passwd_entry->pw_name
  	);
  	fclose(file);
-@@ -1054,10 +1109,11 @@ void setupPrefix()
+@@ -1054,10 +1218,11 @@ void setupPrefix()
  
  	fprintf(file,
  		"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"

@@ -320,9 +320,7 @@ def runtime_identity(properties, metadata, hardware_profile=None, cpu_brand_stri
     # prefix without storing another identifier; the model and size are an Apple SSD's.
     platform_uuid = properties.get('IOPlatformUUID')
     if platform_uuid:
-        digest = hashlib.sha256(('darling-lol:disk:' + platform_uuid).encode()).digest()
-        serial = ''.join(BASE34[byte % len(BASE34)] for byte in digest[:12])
-        values['hw.disk.serial'] = serial
+        values['hw.disk.serial'] = ssd_serial(platform_uuid)
         model, size = selected.get('disk', ('APPLE SSD AP0512Q', 500277790720))
         values['hw.disk.model'] = model
         values['hw.disk.size'] = str(size)
@@ -557,6 +555,21 @@ def save_provisioning(prefix, properties, runtime_root, hardware_profile=None,
     return changed
 
 
+def ssd_serial(platform_uuid):
+    """An Apple SSD serial derived from the platform UUID, shaped like a real Macmini8,1's.
+
+    That unit's APPLE SSD AP0512M reports "C079074004UJRT9AW" (IORegistry, DarwinDumped):
+    17 characters, plant C07, a year digit, a two-digit week, four digits, then seven
+    letters and digits.
+    """
+    digest = hashlib.sha256(('darling-lol:disk:' + platform_uuid).encode()).digest()
+    year = '890'[digest[0] % 3]
+    week = '%02d' % (1 + digest[1] % 52)
+    unit = '%04d' % (int.from_bytes(digest[2:4], 'big') % 10000)
+    tail = ''.join(BASE34[byte % len(BASE34)] for byte in digest[4:11])
+    return 'C07' + year + week + unit + tail
+
+
 def mac_account_full_name(login):
     """The account's full name as a Mac shows it: the host's first GECOS field, else the login."""
     try:
@@ -569,11 +582,19 @@ def mac_account_full_name(login):
     return name
 
 
+# The first account set up on a Mac: uid 501, primary group staff (20). The guest's
+# processes take their (virtual) ids from this record (darling.c); files on the host
+# keep their owner, and host processes keep running as the host user.
+MAC_USER_UID = 501
+MAC_USER_GID = 20
+
+
 def mac_account_files(prefix):
     """passwd/master.passwd with Darling's generated user records made Mac-like.
 
-    Darling writes the user as "Darling User" with /bin/bash; a Mac account carries the
-    person's full name and zsh. Only lines Darling generated are changed.
+    Darling writes the user as "Darling User" with /bin/bash and the host's ids; a Mac
+    account carries the person's full name, zsh, uid 501 and group staff. Only lines
+    Darling generated (the account whose home is under /Users) are changed.
     """
     result = {}
     for relative, gecos_field in (('private/etc/passwd', 4), ('private/etc/master.passwd', 7)):
@@ -589,6 +610,10 @@ def mac_account_files(prefix):
                 fields[gecos_field] = mac_account_full_name(fields[0])
                 fields[-1] = '/bin/zsh'
                 line = ':'.join(fields)
+            if (len(fields) > gecos_field + 2 and fields[0] != 'root'
+                    and fields[-2] == '/Users/' + fields[0]):
+                fields[2], fields[3] = str(MAC_USER_UID), str(MAC_USER_GID)
+                line = ':'.join(fields)
             lines.append(line)
         updated = '\n'.join(lines)
         if updated != text:
@@ -599,34 +624,55 @@ def mac_account_files(prefix):
     return result
 
 
-# The system groups of a macOS install's /etc/group (name, gid, members). Darling writes
-# only wheel and the user's own group. The person who set up a Mac is an administrator,
-# so the account Darling generated is listed in staff and admin as well.
+# The system groups of a macOS install's /etc/group (name, gid, members), and those an
+# administrator account (the person who set up the Mac) belongs to, in the order `id`
+# lists them on a Mac: staff, everyone, localaccounts, _appserverusr, admin,
+# _appserveradm, _lpadmin, _appstore, _lpoperator, _developer, _analyticsusers.
 MAC_SYSTEM_GROUPS = (
     ('nobody', -2, ''), ('nogroup', -1, ''), ('wheel', 0, 'root'), ('daemon', 1, 'root'),
     ('kmem', 2, 'root'), ('sys', 3, 'root'), ('tty', 4, 'root'), ('operator', 5, 'root'),
     ('mail', 6, ''), ('bin', 7, ''), ('procview', 8, 'root'), ('procmod', 9, 'root'),
     ('owner', 10, ''), ('everyone', 12, ''), ('group', 16, ''), ('staff', 20, 'root'),
-    ('certusers', 29, 'root'), ('localaccounts', 61, ''), ('admin', 80, 'root'),
+    ('certusers', 29, 'root'), ('localaccounts', 61, ''), ('_appserverusr', 79, ''),
+    ('admin', 80, 'root'), ('_appserveradm', 81, ''), ('_lpadmin', 98, ''),
+    ('_appstore', 33, ''), ('_lpoperator', 100, ''), ('_developer', 204, ''),
+    ('_analyticsusers', 250, ''),
 )
-MAC_USER_GROUPS = ('staff', 'admin')
+MAC_USER_GROUPS = ('staff', 'everyone', 'localaccounts', '_appserverusr', 'admin',
+                   '_appserveradm', '_lpadmin', '_appstore', '_lpoperator', '_developer',
+                   '_analyticsusers')
 
 
 def mac_group_file(prefix):
-    """/etc/group with the Mac system groups Darling leaves out, or None if nothing is missing.
+    """/etc/group made a Mac's, or None if it already is.
 
-    Groups already present (by name or gid) are kept as they are; missing ones are added.
+    Missing Mac system groups are added (a group whose name or gid is taken is left as it
+    is), the account is a member of an administrator's groups, and it is no longer listed
+    in the groups Darling generated for it (wheel and its own per-user group), which a
+    Mac account is not a member of.
     """
     path = checked_path(prefix, 'private/etc/group')
     passwd = checked_path(prefix, 'private/etc/passwd')
     if not path.exists() or not passwd.exists():
         return None
     users = [fields[0] for fields in (line.split(':') for line in passwd.read_text().splitlines())
-             if len(fields) >= 6 and fields[0] != 'root' and fields[5].startswith('/Users/')]
+             if len(fields) >= 6 and fields[0] != 'root' and fields[5] == '/Users/' + fields[0]]
     text = path.read_text()
-    rows = [line.split(':') for line in text.splitlines() if line and not line.startswith('#')]
-    names = {row[0] for row in rows}
-    gids = {row[2] for row in rows if len(row) > 2}
+    lines = text.split('\n')
+    names, gids = set(), set()
+    for index, line in enumerate(lines):
+        fields = line.split(':')
+        if len(fields) != 4 or line.startswith('#'):
+            continue
+        names.add(fields[0])
+        gids.add(fields[2])
+        members = [m for m in fields[3].split(',') if m]
+        if fields[0] == 'wheel' or fields[0] in users:
+            members = [m for m in members if m not in users]
+        elif fields[0] in MAC_USER_GROUPS:
+            members += [u for u in users if u not in members]
+        fields[3] = ','.join(members)
+        lines[index] = ':'.join(fields)
     added = []
     for name, gid, members in MAC_SYSTEM_GROUPS:
         if name in names or str(gid) in gids:
@@ -635,9 +681,10 @@ def mac_group_file(prefix):
         if name in MAC_USER_GROUPS:
             listed += [u for u in users if u not in listed]
         added.append('%s:*:%d:%s' % (name, gid, ','.join(listed)))
-    if not added:
-        return None
-    return (text.rstrip('\n') + '\n' + '\n'.join(added) + '\n').encode()
+    updated = '\n'.join(lines)
+    if added:
+        updated = updated.rstrip('\n') + '\n' + '\n'.join(added) + '\n'
+    return updated.encode() if updated != text else None
 
 
 def _bundle_plist(identifier, name, executable=None, package='APPL', version='14.7'):
