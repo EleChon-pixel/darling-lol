@@ -12348,10 +12348,10 @@ index 0000000..38c26d6
 +#endif
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c
 new file mode 100644
-index 0000000..a1860b5
+index 0000000..021b1ba
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c
-@@ -0,0 +1,611 @@
+@@ -0,0 +1,640 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/call_trace.h>
 +
 +#include <stdbool.h>
@@ -12845,6 +12845,35 @@ index 0000000..a1860b5
 +	{
 +		put_string_args(&l, args);
 +		put_sysctl_result(&l, args[2], args[3]);
++	}
++	else if (nr == 54 && (unsigned int) args[1] == 0xC0644E03u) /* ioctl(CTLIOCGINFO, struct ctl_info*) */
++	{
++		/* struct ctl_info { u_int32_t ctl_id; char ctl_name[96]; }: the control asked for */
++		unsigned char info[4 + 96];
++		long n = peek((const void*) args[2], info, sizeof(info));
++		long length = 0;
++
++		while (4 + length < n && length < 95 && printable(info[4 + length]) && info[4 + length] != '"')
++			length++;
++		put(&l, " ctl=\"");
++		for (long k = 0; k < length; k++)
++			put_char(&l, (char) info[4 + k]);
++		put(&l, "\" ctl_id=");
++		put_number(&l, n >= 4 ? (unsigned long) (info[0] | info[1] << 8 | info[2] << 16 | (unsigned long) info[3] << 24) : 0, 10);
++	}
++	else if (nr == 98) /* connect(fd, sockaddr*, len): a kernel control address names its control */
++	{
++		/* struct sockaddr_ctl { u8 len, family; u16 sysaddr; u32 id, unit; ... } */
++		unsigned char ctl[12];
++		if (peek((const void*) args[1], ctl, sizeof(ctl)) == sizeof(ctl) && ctl[1] == 32)
++		{
++			put(&l, " ctl_id=");
++			put_number(&l, ctl[4] | ctl[5] << 8 | ctl[6] << 16 | (unsigned long) ctl[7] << 24, 10);
++			put(&l, " unit=");
++			put_number(&l, ctl[8] | ctl[9] << 8 | ctl[10] << 16 | (unsigned long) ctl[11] << 24, 10);
++		}
++		else
++			put_string_args(&l, args);
 +	}
 +	else if (!data_call(nr))
 +		put_string_args(&l, args);
