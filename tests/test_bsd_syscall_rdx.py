@@ -34,14 +34,32 @@ class BsdSyscallRdx(unittest.TestCase):
 
     def test_stack_arguments_and_parity_are_preserved(self):
         body = self.x86.split('jz\t\t.no_sys', 1)[1].split('call\t*%r10', 1)[0]
-        # Two slots for the syscall number keep the handlers' stack parity,
-        # so the 7th and 8th arguments move from 24(%rsp) to 40(%rsp).
+        # Eight slots keep the register arguments for the call trace and two keep the
+        # syscall number; both are even, so the handlers' stack parity is unchanged and
+        # the 7th and 8th arguments move from 24(%rsp) to 104(%rsp).
+        self.assertIn('subq\t$16, %rsp', body)
+        for register in ('%r9', '%r8', '%rcx', '%rdx', '%rsi', '%rdi'):
+            self.assertEqual(body.count('pushq\t' + register), 1)
         self.assertEqual(body.count('pushq\t%rax'), 2)
-        self.assertEqual(body.count('movq\t40(%rsp), %r11'), 2)
+        self.assertEqual(body.count('movq\t104(%rsp), %r11'), 2)
         self.assertNotIn('movq\t24(%rsp), %r11', body)
+        self.assertNotIn('movq\t40(%rsp), %r11', body)
         after = self.x86.split('call\t*%r10', 1)[1].split('Lexit_hook:', 1)[0]
-        self.assertEqual(after.count('popq\t%r10'), 2)
+        self.assertEqual(after.count('addq\t$64, %rsp'), 1)
 
+    def test_call_trace_is_one_flag_test_when_off(self):
+        after = self.x86.split('call\t*%r10', 1)[1].split('Lexit_hook:', 1)[0]
+        trace = after.split('cmpl\t$0, ___darling_call_trace_state(%rip)', 1)[1].split('.no_trace:', 1)[0]
+        self.assertTrue(trace.lstrip().startswith('je\t\t.no_trace'))
+        # The trace call keeps the result registers and the syscall number, on an even
+        # number of slots, and sees the saved arguments and the caller's stack.
+        for register in ('%rax', '%rdx'):
+            self.assertEqual(trace.count('pushq\t' + register), 1)
+            self.assertEqual(trace.count('popq\t' + register), 1)
+        self.assertEqual(trace.count('pushq\t%r10'), 2)
+        self.assertIn('leaq\t32(%rsp), %rsi', trace)
+        self.assertIn('leaq\t96(%rsp), %rcx', trace)
+        self.assertLess(after.index('.no_trace:'), after.index('cmpq\t$2, %r10'))
 
 if __name__ == '__main__':
     unittest.main()

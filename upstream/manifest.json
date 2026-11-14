@@ -318,7 +318,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 99,
+   "modified_files": 100,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h",
@@ -340,7 +340,9 @@
     "darling/src/libsystem_kernel/emulation/include/common/host_env.h",
     "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/guest_view.h",
     "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c",
-    "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h"
+    "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h",
+    "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/call_trace.h",
+    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c"
    ]
   },
   {

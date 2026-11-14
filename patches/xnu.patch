@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..c9f7571 100644
+index 5b2e765..3861672 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -52,15 +52,16 @@ index 5b2e765..c9f7571 100644
  
  # include src/startup for rtsig.h
  include_directories(
-@@ -103,6 +102,7 @@ set(xnu_syscall_bsd_sources
+@@ -103,6 +102,8 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
  	src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
  	src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +	src/xnu_syscall/bsd/helper/misc/guest_view.c
++	src/xnu_syscall/bsd/helper/misc/call_trace.c
  	src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
  	src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
  	src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
-@@ -134,6 +134,7 @@ set(xnu_syscall_bsd_sources
+@@ -134,6 +135,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_kqueue_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_open_np.c
@@ -68,7 +69,7 @@ index 5b2e765..c9f7571 100644
  	src/xnu_syscall/bsd/impl/hfs/stub.c
  	src/xnu_syscall/bsd/impl/ioctl/ioctl.c
  	src/xnu_syscall/bsd/impl/kqueue/kevent.c
-@@ -144,6 +145,7 @@ set(xnu_syscall_bsd_sources
+@@ -144,6 +146,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/clonefile.c
  	src/xnu_syscall/bsd/impl/misc/csops.c
  	src/xnu_syscall/bsd/impl/misc/csrctl.c
@@ -76,7 +77,7 @@ index 5b2e765..c9f7571 100644
  	src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
  	src/xnu_syscall/bsd/impl/misc/fileport_makeport.c
  	src/xnu_syscall/bsd/impl/misc/fsgetpath.c
-@@ -153,6 +155,7 @@ set(xnu_syscall_bsd_sources
+@@ -153,6 +156,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/getrlimit.c
  	src/xnu_syscall/bsd/impl/misc/getrusage.c
  	src/xnu_syscall/bsd/impl/misc/iopolicysys.c
@@ -84,7 +85,7 @@ index 5b2e765..c9f7571 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -162,6 +165,7 @@ set(xnu_syscall_bsd_sources
+@@ -162,6 +166,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/syscall.c
  	src/xnu_syscall/bsd/impl/misc/sysctl.c
  	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
@@ -92,7 +93,7 @@ index 5b2e765..c9f7571 100644
  	src/xnu_syscall/bsd/impl/mman/madvise.c
  	src/xnu_syscall/bsd/impl/mman/mman.c
  	src/xnu_syscall/bsd/impl/mman/msync.c
-@@ -359,6 +363,11 @@ set(emulation_sources
+@@ -359,6 +364,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -2117,19 +2118,20 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..e0aa5d4 100644
+index 206e92e..f25f88f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-@@ -6,6 +6,8 @@
+@@ -6,6 +6,9 @@
  #include <_libkernel_init.h>
  
  #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaction.h>
 +#include <darling/emulation/common/runtime_identity.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/call_trace.h>
 +#include <stdbool.h>
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/exit.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-@@ -151,8 +153,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -151,8 +154,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  	int status = dserver_rpc_interrupt_enter();
  
  	if (status != 0) {
@@ -2145,7 +2147,7 @@ index 206e92e..e0aa5d4 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -197,8 +204,265 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -197,8 +205,267 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  }
  
  
@@ -2390,6 +2392,8 @@ index 206e92e..e0aa5d4 100644
 +		break;
 +	}
 +	}
++	__darling_call_trace_cpuid(ctxt->uc_mcontext.gregs.rip, (const unsigned long*) ctxt->uc_mcontext.gregs.rsp,
++		leaf, subleaf, a, b, c, d);
 +	ctxt->uc_mcontext.gregs.rax = a;
 +	ctxt->uc_mcontext.gregs.rbx = b;
 +	ctxt->uc_mcontext.gregs.rcx = c;
@@ -2411,7 +2415,7 @@ index 206e92e..e0aa5d4 100644
  	am_i_ptraced = true;
  
  	__simple_kprintf("darling_sigexc_self()\n");
-@@ -267,13 +531,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +534,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -2583,7 +2587,7 @@ index 206e92e..e0aa5d4 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +780,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +783,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -2721,28 +2725,55 @@ index 8c6d5d9..6fd1acf 100644
  }
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
-index a26ae39..3105366 100644
+index a26ae39..82004fb 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
-@@ -11,13 +11,34 @@ Lentry_hook:
+@@ -11,13 +11,61 @@ Lentry_hook:
  	movq	(%r10,%rax,8), %r10
  	test	%r10, %r10
  	jz		.no_sys
-+	# darling-lol: keep the syscall number (two slots, so the stack parity
-+	# the handlers see is unchanged) to fix up %rdx after the call.
++	# darling-lol: keep the register arguments for the call trace (eight slots,
++	# so the stack parity the handlers see is unchanged).
++	subq	$16, %rsp
++	pushq	%r9
++	pushq	%r8
++	pushq	%rcx
++	pushq	%rdx
++	pushq	%rsi
++	pushq	%rdi
++	# darling-lol: keep the syscall number (two slots, same parity) to fix up
++	# %rdx after the call.
 +	pushq	%rax
 +	pushq	%rax
  	# Re-push possible 7th and 8th arg
 -	movq	24(%rsp), %r11
-+	movq	40(%rsp), %r11
++	movq	104(%rsp), %r11
  	pushq	%r11
 -	movq	24(%rsp), %r11
-+	movq	40(%rsp), %r11
++	movq	104(%rsp), %r11
  	pushq	%r11
  	call	*%r10
  	addq	$16, %rsp
 +	popq	%r10
 +	popq	%r10
++	# darling-lol: call trace (helper/misc/call_trace.c), off unless configured.
++	cmpl	$0, ___darling_call_trace_state(%rip)
++	je		.no_trace
++	pushq	%rax
++	pushq	%rdx
++	pushq	%r10
++	pushq	%r10
++	movq	%r10, %rdi
++	leaq	32(%rsp), %rsi
++	movq	%rax, %rdx
++	leaq	96(%rsp), %rcx
++	call	___darling_call_trace_bsd
++	popq	%r10
++	popq	%r10
++	popq	%rdx
++	popq	%rax
++.no_trace:
++	addq	$64, %rsp
 +	# darling-lol: XNU returns rv[1] in %rdx, which is 0 for every BSD syscall
 +	# except the few whose stubs consume it. Handlers here are C functions that
 +	# leave %rdx undefined; Chromium's SendtoAndDetectBogusReturnValue treats a
@@ -11812,3 +11843,716 @@ index e1a2b35..809d5f9 100644
  	ret = LINUX_SYSCALL(__NR_kill, pid, linux_signum);
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
+index b02d447..6bbcc25 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/mach_syscall.S
+@@ -15,13 +15,57 @@ Lentry_hook:
+ 	movq	(%r10,%rax,8), %r10
+ 	test	%r10, %r10
+ 	jz		.no_sys
++	# darling-lol: keep the register arguments for the call trace
++	# (helper/misc/call_trace.c; eight slots, so the stack parity is unchanged).
++	subq	$16, %rsp
++	pushq	%r9
++	pushq	%r8
++	pushq	%rcx
++	pushq	%rdx
++	pushq	%rsi
++	pushq	%rdi
++	cmpl	$0, ___darling_call_trace_state(%rip)
++	je		.no_trace_entry
++	pushq	%rax
++	pushq	%r10
++	movq	%rax, %rdi
++	leaq	16(%rsp), %rsi
++	leaq	80(%rsp), %rdx
++	call	___darling_call_trace_mach_entry
++	popq	%r10
++	popq	%rax
++	movq	0(%rsp), %rdi
++	movq	8(%rsp), %rsi
++	movq	16(%rsp), %rdx
++	movq	24(%rsp), %rcx
++	movq	32(%rsp), %r8
++	movq	40(%rsp), %r9
++.no_trace_entry:
++	# the trap number, for the trace after the call (two slots)
++	pushq	%rax
++	pushq	%rax
+ 	# Re-push possible 7th and 8th arg
+-	movq	24(%rsp), %r11
++	movq	104(%rsp), %r11
+ 	pushq	%r11
+-	movq	24(%rsp), %r11
++	movq	104(%rsp), %r11
+ 	pushq	%r11
+ 	call	*%r10
+ 	addq	$16, %rsp
++	popq	%r10
++	popq	%r10
++	cmpl	$0, ___darling_call_trace_state(%rip)
++	je		.no_trace_exit
++	pushq	%rax
++	pushq	%rdx
++	movq	%r10, %rdi
++	leaq	16(%rsp), %rsi
++	movq	%rax, %rdx
++	leaq	80(%rsp), %rcx
++	call	___darling_call_trace_mach
++	popq	%rdx
++	popq	%rax
++.no_trace_exit:
++	addq	$64, %rsp
+ .std_ret:
+ Lexit_hook:
+ 	.space 13, 0x90
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/call_trace.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/call_trace.h
+new file mode 100644
+index 0000000..38c26d6
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/call_trace.h
+@@ -0,0 +1,26 @@
++#ifndef DARLING_EMULATION_CALL_TRACE_H
++#define DARLING_EMULATION_CALL_TRACE_H
++
++/*
++ * darling-lol: record what one image's code asks the system for.
++ *
++ * When <prefix>/private/etc/darling-call-trace.conf names an image (a substring of its
++ * path, e.g. "mvg.framework/"), every BSD system call, Mach trap and CPUID made while
++ * that image's code is on the calling thread's stack is appended, with its arguments
++ * and our answer, to <prefix>/private/etc/darling-call-trace.log. Both files are
++ * hidden from the guest like Darling's other files. Without the file the dispatchers
++ * only test one flag. The dispatchers (bsd_syscall.S, mach_syscall.S) and the CPUID
++ * emulation (sigexc.c) call in here; everything below uses raw Linux system calls.
++ */
++
++/* -1 until the first call decides, then 0 (off) or 1 (on). Read by the dispatchers. */
++extern int __darling_call_trace_state;
++
++/* args: the six register arguments. sp: the caller's stack at the dispatcher's entry. */
++void __darling_call_trace_bsd(long nr, const long* args, long ret, const unsigned long* sp);
++void __darling_call_trace_mach_entry(long nr, const long* args, const unsigned long* sp);
++void __darling_call_trace_mach(long nr, const long* args, long ret, const unsigned long* sp);
++void __darling_call_trace_cpuid(unsigned long rip, const unsigned long* sp, unsigned int leaf, unsigned int subleaf,
++	unsigned int a, unsigned int b, unsigned int c, unsigned int d);
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c
+new file mode 100644
+index 0000000..a1860b5
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/call_trace.c
+@@ -0,0 +1,611 @@
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/call_trace.h>
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/conversion/fcntl/open.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++const char* __darling_vchroot_prefix(int* length);
++
++#define TRACE_CONF "/private/etc/darling-call-trace.conf"
++#define TRACE_LOG "/private/etc/darling-call-trace.log"
++#define STACK_WORDS 1024
++#define SIGNAL_STACK_WORDS 96
++#define MAX_HITS 3
++#define RESCAN_SECONDS 2
++#define LINUX_CLOCK_MONOTONIC_COARSE 6
++
++__attribute__((visibility("hidden"))) int __darling_call_trace_state = -1;
++
++static char trace_image[64];
++static char trace_log[4096 + sizeof(TRACE_LOG)];
++static unsigned long image_lo, image_hi;
++static long last_scan;
++static unsigned int calls_since_check;
++
++struct iov { void* base; unsigned long length; };
++struct linux_ts { long sec; long nsec; };
++struct line { char text[1536]; unsigned int length; };
++struct hit { unsigned int depth; unsigned long offset; };
++
++/* libsystem_kernel has no fortified string functions to link against; this also
++ * copies overlapping ranges when the destination is the lower one. */
++static void copy(void* to, const void* from, unsigned long size)
++{
++	char* d = to;
++	const char* f = from;
++
++	while (size--)
++		*d++ = *f++;
++}
++
++/* The string functions libsystem_kernel exports go through a table libc fills in
++ * later; traps are traced from the first one, so these are local. */
++static char* find_char(char* text, char c)
++{
++	for (; *text; text++)
++	{
++		if (*text == c)
++			return text;
++	}
++	return NULL;
++}
++
++static bool contains(const char* text, const char* word)
++{
++	for (; *text; text++)
++	{
++		const char* a = text;
++		const char* b = word;
++
++		while (*b && *a == *b)
++		{
++			a++;
++			b++;
++		}
++		if (!*b)
++			return true;
++	}
++	return false;
++}
++
++static long linux_open(const char* path, int flags, int mode)
++{
++#if defined(__NR_open)
++	return LINUX_SYSCALL(__NR_open, path, flags, mode);
++#else
++	return LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, path, flags, mode);
++#endif
++}
++
++/* Copy from our own address space without faulting on a bad pointer. */
++static long peek(const void* address, void* buffer, unsigned long size)
++{
++	struct iov local = { buffer, size }, remote = { (void*) address, size };
++	long rv;
++
++	if ((unsigned long) address < 0x1000)
++		return 0;
++	rv = LINUX_SYSCALL(__NR_process_vm_readv, LINUX_SYSCALL(__NR_getpid), &local, 1, &remote, 1, 0);
++	return rv > 0 ? rv : 0;
++}
++
++static void put_char(struct line* l, char c)
++{
++	if (l->length < sizeof(l->text) - 1)
++		l->text[l->length++] = c;
++}
++
++static void put(struct line* l, const char* s)
++{
++	while (*s)
++		put_char(l, *s++);
++}
++
++static void put_number(struct line* l, unsigned long value, unsigned int base)
++{
++	char digits[24];
++	int n = 0;
++
++	do
++	{
++		digits[n++] = "0123456789abcdef"[value % base];
++		value /= base;
++	} while (value);
++	while (n)
++		put_char(l, digits[--n]);
++}
++
++static void put_hex(struct line* l, unsigned long value)
++{
++	put(l, "0x");
++	put_number(l, value, 16);
++}
++
++static bool printable(unsigned char c)
++{
++	return c >= 0x20 && c < 0x7f;
++}
++
++static void put_bytes(struct line* l, const unsigned char* data, unsigned long length)
++{
++	for (unsigned long i = 0; i < length; i++)
++	{
++		put_char(l, "0123456789abcdef"[data[i] >> 4]);
++		put_char(l, "0123456789abcdef"[data[i] & 15]);
++	}
++}
++
++/* The printable runs of at least four characters in data, separated by '|'. */
++static void put_strings(struct line* l, const unsigned char* data, unsigned long length)
++{
++	unsigned long start = 0;
++	bool any = false;
++
++	for (unsigned long i = 0; i <= length; i++)
++	{
++		if (i < length && printable(data[i]) && data[i] != '"')
++			continue;
++		if (i - start >= 4)
++		{
++			if (any)
++				put_char(l, '|');
++			for (unsigned long k = start; k < i; k++)
++				put_char(l, (char) data[k]);
++			any = true;
++		}
++		start = i + 1;
++	}
++}
++
++static void trace_setup(void)
++{
++	static const char conf[] = TRACE_CONF;
++	static const char log[] = TRACE_LOG;
++	char path[4096 + sizeof(conf)];
++	char name[sizeof(trace_image)];
++	const char* prefix;
++	int prefix_length = 0, fd, rd, n = 0;
++
++	prefix = __darling_vchroot_prefix(&prefix_length);
++	if (!prefix || prefix_length <= 0 || prefix_length > 4096)
++	{
++		__darling_call_trace_state = 0;
++		return;
++	}
++	copy(path, prefix, prefix_length);
++	copy(path + prefix_length, conf, sizeof(conf));
++	fd = linux_open(path, LINUX_O_RDONLY, 0);
++	if (fd < 0)
++	{
++		__darling_call_trace_state = 0;
++		return;
++	}
++	rd = LINUX_SYSCALL(__NR_read, fd, name, sizeof(name) - 1);
++	LINUX_SYSCALL(__NR_close, fd);
++	while (n < rd && printable((unsigned char) name[n]) && name[n] != ' ')
++		n++;
++	if (n < 3)
++	{
++		__darling_call_trace_state = 0;
++		return;
++	}
++	copy(trace_image, name, n);
++	trace_image[n] = '\0';
++	copy(trace_log, prefix, prefix_length);
++	copy(trace_log + prefix_length, log, sizeof(log));
++	__darling_call_trace_state = 1;
++}
++
++static unsigned long parse_hex(const char** p)
++{
++	unsigned long value = 0;
++
++	for (;; (*p)++)
++	{
++		char c = **p;
++		if (c >= '0' && c <= '9')
++			value = value * 16 + (c - '0');
++		else if (c >= 'a' && c <= 'f')
++			value = value * 16 + (c - 'a' + 10);
++		else
++			return value;
++	}
++}
++
++static void scan_line(const char* text)
++{
++	const char* p = text;
++	unsigned long lo, hi;
++
++	lo = parse_hex(&p);
++	if (*p++ != '-')
++		return;
++	hi = parse_hex(&p);
++	/* " r-xp ..." */
++	if (p[0] != ' ' || p[3] != 'x' || !contains(p, trace_image))
++		return;
++	if (image_lo == 0 || lo < image_lo)
++		image_lo = lo;
++	if (hi > image_hi)
++		image_hi = hi;
++}
++
++/* The traced image's executable mappings, from /proc/self/maps. */
++static void scan_maps(void)
++{
++	char buffer[4096 + 1];
++	int fd, used = 0, rd;
++
++	fd = linux_open("/proc/self/maps", LINUX_O_RDONLY, 0);
++	if (fd < 0)
++		return;
++	while ((rd = LINUX_SYSCALL(__NR_read, fd, buffer + used, sizeof(buffer) - 1 - used)) > 0)
++	{
++		char* line = buffer;
++		char* newline;
++
++		used += rd;
++		buffer[used] = '\0';
++		while ((newline = find_char(line, '\n')) != NULL)
++		{
++			*newline = '\0';
++			scan_line(line);
++			line = newline + 1;
++		}
++		used -= (int)(line - buffer);
++		if (used >= (int) sizeof(buffer) - 1)
++			used = 0; /* an overlong line: drop it */
++		copy(buffer, line, used);
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++}
++
++static bool image_known(void)
++{
++	struct linux_ts now;
++
++	if (image_hi)
++		return true;
++	/* Not loaded (yet): look again every few seconds, checking the clock rarely. */
++	if (last_scan && (++calls_since_check & 31))
++		return false;
++	if (LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_MONOTONIC_COARSE, &now) != 0)
++		return false;
++	if (last_scan && now.sec - last_scan < RESCAN_SECONDS)
++		return false;
++	last_scan = now.sec ? now.sec : 1;
++	scan_maps();
++	return image_hi != 0;
++}
++
++/* Return addresses into the image on the caller's stack, nearest first. */
++/* A return address follows a call instruction: E8 rel32, or FF /2 in one of its
++ * encodings. Stacks also hold pointers to the image's header and data. */
++static bool after_call(unsigned long address)
++{
++	unsigned char before[8];
++
++	if (address < image_lo + sizeof(before) || peek((const void*)(address - sizeof(before)), before, sizeof(before)) != sizeof(before))
++		return false;
++	if (before[3] == 0xe8)
++		return true;
++	for (int length = 2; length <= 7; length++)
++	{
++		if (before[8 - length] == 0xff && ((before[8 - length + 1] >> 3) & 7) == 2)
++			return true;
++	}
++	return false;
++}
++
++static int scan_words(const unsigned long* words, unsigned long count, struct hit* hits)
++{
++	int found = 0;
++
++	for (unsigned int i = 0; i < count && found < MAX_HITS; i++)
++	{
++		if (words[i] >= image_lo && words[i] < image_hi && after_call(words[i]))
++		{
++			hits[found].depth = i;
++			hits[found].offset = words[i] - image_lo;
++			found++;
++		}
++	}
++	return found;
++}
++
++__attribute__((noinline))
++static int image_frames(const unsigned long* sp, struct hit* hits)
++{
++	unsigned long words[STACK_WORDS];
++	long bytes = peek(sp, words, sizeof(words));
++
++	return scan_words(words, (unsigned long) bytes / sizeof(words[0]), hits);
++}
++
++/* For the signal stack: a shallow look that needs little room itself. */
++__attribute__((noinline))
++static int near_frames(const unsigned long* sp, struct hit* hits)
++{
++	unsigned long words[SIGNAL_STACK_WORDS];
++	long bytes = peek(sp, words, sizeof(words));
++
++	return scan_words(words, (unsigned long) bytes / sizeof(words[0]), hits);
++}
++
++static bool traced(const unsigned long* sp, struct hit* hits, int* count)
++{
++	if (__darling_call_trace_state < 0)
++		trace_setup();
++	if (__darling_call_trace_state != 1 || !image_known())
++		return false;
++	*count = image_frames(sp, hits);
++	return *count > 0;
++}
++
++static void begin(struct line* l, const char* kind, long nr, const struct hit* hits, int count)
++{
++	struct linux_ts now = { 0, 0 };
++
++	l->length = 0;
++	LINUX_SYSCALL(__NR_clock_gettime, 1 /* CLOCK_MONOTONIC */, &now);
++	put_number(l, now.sec, 10);
++	put_char(l, '.');
++	put_number(l, 1000000 + now.nsec / 1000, 10); /* six digits after a leading 1 */
++	put_char(l, ' ');
++	put_number(l, LINUX_SYSCALL(__NR_getpid), 10);
++	put_char(l, ' ');
++	put_number(l, LINUX_SYSCALL(__NR_gettid), 10);
++	put_char(l, ' ');
++	put(l, kind);
++	put_char(l, ' ');
++	put_number(l, nr, 10);
++	put(l, " from=");
++	for (int i = 0; i < count; i++)
++	{
++		if (i)
++			put_char(l, ',');
++		put_number(l, hits[i].depth, 10);
++		put_char(l, ':');
++		put_hex(l, hits[i].offset);
++	}
++}
++
++static void put_args(struct line* l, const long* args)
++{
++	put(l, " args=");
++	for (int i = 0; i < 6; i++)
++	{
++		if (i)
++			put_char(l, ',');
++		put_hex(l, args[i]);
++	}
++}
++
++static void finish(struct line* l)
++{
++	long fd;
++
++	put_char(l, '\n');
++	/* One write per line with O_APPEND keeps lines of concurrent threads whole; the
++	 * file is not kept open, so the guest's descriptor table is unchanged. */
++	fd = linux_open(trace_log, LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_APPEND | LINUX_O_CLOEXEC, 0600);
++	if (fd < 0)
++		return;
++	LINUX_SYSCALL(__NR_write, fd, l->text, l->length);
++	LINUX_SYSCALL(__NR_close, fd);
++}
++
++/* Arguments that point at text (paths, names): s<index>="...". */
++static void put_string_args(struct line* l, const long* args)
++{
++	for (int i = 0; i < 6; i++)
++	{
++		unsigned char text[200];
++		long n = peek((const void*) args[i], text, sizeof(text));
++		long length = 0;
++
++		while (length < n && printable(text[length]) && text[length] != '"')
++			length++;
++		if (length < 3 || (length < n && text[length] != '\0'))
++			continue;
++		put(l, " s");
++		put_number(l, i, 10);
++		put(l, "=\"");
++		for (long k = 0; k < length; k++)
++			put_char(l, (char) text[k]);
++		put_char(l, '"');
++	}
++}
++
++/* The value a sysctl returned: old buffer and its length pointer. */
++static void put_sysctl_result(struct line* l, long old, long oldlenp)
++{
++	unsigned char value[96];
++	unsigned long length = 0;
++	long n;
++
++	if (peek((const void*) oldlenp, &length, sizeof(length)) != sizeof(length))
++		return;
++	put(l, " outlen=");
++	put_number(l, length, 10);
++	n = peek((const void*) old, value, length < sizeof(value) ? length : sizeof(value));
++	if (n <= 0)
++		return;
++	put(l, " out=");
++	put_bytes(l, value, n);
++	put(l, " outs=\"");
++	put_strings(l, value, n);
++	put_char(l, '"');
++}
++
++/* read, write and the socket transfers: their buffers are data, not names. */
++static bool data_call(long nr)
++{
++	switch (nr)
++	{
++	case 3: case 4: case 27: case 28: case 29: case 30: case 120: case 121: case 133:
++	case 153: case 154: case 173: case 174: case 396: case 397: case 398: case 399:
++	case 401: case 402: case 403: case 404:
++		return true;
++	}
++	return false;
++}
++
++void __darling_call_trace_bsd(long nr, const long* args, long ret, const unsigned long* sp)
++{
++	struct hit hits[MAX_HITS];
++	struct line l;
++	int count;
++
++	if (!traced(sp, hits, &count))
++		return;
++	begin(&l, "bsd", nr, hits, count);
++	put(&l, " ret=");
++	put_hex(&l, ret);
++	put_args(&l, args);
++	if (nr == 202) /* sysctl(name, namelen, old, oldlenp, new, newlen) */
++	{
++		int mib[12];
++		unsigned long n = (unsigned long) args[1] < 12 ? (unsigned long) args[1] : 12;
++
++		if (peek((const void*) args[0], mib, n * sizeof(int)) == (long)(n * sizeof(int)))
++		{
++			put(&l, " mib=");
++			for (unsigned long i = 0; i < n; i++)
++			{
++				if (i)
++					put_char(&l, '.');
++				put_number(&l, (unsigned int) mib[i], 10);
++			}
++		}
++		/* {0,3} (name to MIB) takes the name as the new value */
++		if (n == 2 && mib[0] == 0 && mib[1] == 3)
++			put_string_args(&l, args);
++		put_sysctl_result(&l, args[2], args[3]);
++	}
++	else if (nr == 274) /* sysctlbyname(name, namelen, old, oldlenp, new, newlen) */
++	{
++		put_string_args(&l, args);
++		put_sysctl_result(&l, args[2], args[3]);
++	}
++	else if (!data_call(nr))
++		put_string_args(&l, args);
++	finish(&l);
++}
++
++struct mach_header_words { unsigned int bits, size, remote, local, voucher, id; };
++
++static void put_message(struct line* l, long message, bool body)
++{
++	unsigned char data[512];
++	struct mach_header_words header;
++	long n = peek((const void*) message, data, sizeof(data));
++
++	if (n < (long) sizeof(header))
++		n = peek((const void*) message, data, sizeof(header));
++	if (n < (long) sizeof(header))
++		return;
++	copy(&header, data, sizeof(header));
++	put(l, " msgid=");
++	put_number(l, header.id, 10);
++	put(l, " size=");
++	put_number(l, header.size, 10);
++	put(l, " port=");
++	put_hex(l, header.remote);
++	if (!body)
++		return;
++	if (header.size < (unsigned long) n)
++		n = header.size;
++	if (n <= (long) sizeof(header))
++		return;
++	put(l, " data=");
++	put_bytes(l, data + sizeof(header), n - sizeof(header) > 96 ? 96 : n - sizeof(header));
++	put(l, " strs=\"");
++	put_strings(l, data + sizeof(header), n - sizeof(header));
++	put_char(l, '"');
++}
++
++/* mach_msg_trap (31) and mach_msg_overwrite_trap (32): (msg, option, send_size, ...) */
++static bool message_trap(long nr)
++{
++	return nr == 31 || nr == 32;
++}
++
++void __darling_call_trace_mach_entry(long nr, const long* args, const unsigned long* sp)
++{
++	struct hit hits[MAX_HITS];
++	struct line l;
++	int count;
++
++	/* Only requests need the entry: the reply reuses the buffer. */
++	if (!message_trap(nr) || !(args[1] & 1 /* MACH_SEND_MSG */) || !traced(sp, hits, &count))
++		return;
++	begin(&l, "msg-send", nr, hits, count);
++	put_message(&l, args[0], true);
++	finish(&l);
++}
++
++void __darling_call_trace_mach(long nr, const long* args, long ret, const unsigned long* sp)
++{
++	struct hit hits[MAX_HITS];
++	struct line l;
++	int count;
++
++	if (!traced(sp, hits, &count))
++		return;
++	if (message_trap(nr))
++	{
++		if (!(args[1] & 2 /* MACH_RCV_MSG */))
++			return;
++		begin(&l, "msg-reply", nr, hits, count);
++		put(&l, " ret=");
++		put_hex(&l, ret);
++		if (ret == 0)
++			put_message(&l, args[0], true);
++	}
++	else
++	{
++		begin(&l, "mach", nr, hits, count);
++		put(&l, " ret=");
++		put_hex(&l, ret);
++		put_args(&l, args);
++	}
++	finish(&l);
++}
++
++void __darling_call_trace_cpuid(unsigned long rip, const unsigned long* sp, unsigned int leaf, unsigned int subleaf,
++	unsigned int a, unsigned int b, unsigned int c, unsigned int d)
++{
++	struct hit hits[MAX_HITS];
++	struct line l;
++	int count = 0;
++
++	if (__darling_call_trace_state < 0)
++		trace_setup();
++	if (__darling_call_trace_state != 1 || !image_known())
++		return;
++	if (rip >= image_lo && rip < image_hi)
++	{
++		hits[0].depth = 0;
++		hits[0].offset = rip - image_lo;
++		count = 1;
++	}
++	else if ((count = near_frames(sp, hits)) == 0)
++		return;
++	begin(&l, "cpuid", leaf, hits, count);
++	put(&l, " subleaf=");
++	put_hex(&l, subleaf);
++	put(&l, " eax=");
++	put_hex(&l, a);
++	put(&l, " ebx=");
++	put_hex(&l, b);
++	put(&l, " ecx=");
++	put_hex(&l, c);
++	put(&l, " edx=");
++	put_hex(&l, d);
++	finish(&l);
++}
