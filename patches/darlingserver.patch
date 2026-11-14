@@ -2970,7 +2970,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..f6b87cf 100644
+index 9cd7b81..330da04 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,17 +25,34 @@
@@ -3030,11 +3030,14 @@ index 9cd7b81..f6b87cf 100644
  	if (parentProcess) {
  		std::shared_lock parentLock(parentProcess->_rwlock);
  
-@@ -78,8 +103,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -78,8 +103,22 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  		_vchrootDescriptor = parentProcess->_vchrootDescriptor;
  		_cachedVchrootPath = parentProcess->_cachedVchrootPath;
  
 -		// inherit groups from parent process
++		// a fork runs the parent's executable until it execs something else
++		_executablePath = parentProcess->_executablePath;
++
 +		// inherit groups and credentials from parent process
  		_groups = parentProcess->_groups;
 +		_uid.store(parentProcess->_uid.load());
@@ -3051,7 +3054,7 @@ index 9cd7b81..f6b87cf 100644
  	}
  
  	// NOTE: see thread.cpp for why it's okay to use `this` here
-@@ -93,6 +129,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -93,6 +132,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  	_pid(-1),
  	_nspid(0)
  {
@@ -3059,7 +3062,7 @@ index 9cd7b81..f6b87cf 100644
  #if __x86_64__
  	_architecture = Architecture::x86_64;
  #elif __i386__
-@@ -109,6 +146,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -109,6 +149,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -3070,7 +3073,7 @@ index 9cd7b81..f6b87cf 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -221,6 +262,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +265,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  		return false;
  	}
  
@@ -3091,7 +3094,7 @@ index 9cd7b81..f6b87cf 100644
  	local.iov_base = localBuffer;
  	local.iov_len = length;
  
-@@ -245,6 +300,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +303,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -3136,7 +3139,7 @@ index 9cd7b81..f6b87cf 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -278,11 +371,26 @@ bool DarlingServer::Process::writeMemory(uintptr_t remoteAddress, const void* lo
+@@ -278,11 +374,26 @@ bool DarlingServer::Process::writeMemory(uintptr_t remoteAddress, const void* lo
  	return _readOrWriteMemory(true, remoteAddress, const_cast<void*>(localBuffer), length, errorCode);
  };
  
@@ -3163,7 +3166,7 @@ index 9cd7b81..f6b87cf 100644
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +477,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +480,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3183,7 +3186,7 @@ index 9cd7b81..f6b87cf 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +584,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +587,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3291,7 +3294,7 @@ index 9cd7b81..f6b87cf 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +691,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +694,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3354,7 +3357,7 @@ index 9cd7b81..f6b87cf 100644
  
  		info.protection = 0;
  
-@@ -607,6 +849,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +852,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3481,7 +3484,7 @@ index 9cd7b81..f6b87cf 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +1019,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +1022,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
