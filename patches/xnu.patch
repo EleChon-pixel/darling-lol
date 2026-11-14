@@ -12780,3 +12780,608 @@ index 0a7e492..96855e6 100644
  	/*
  	if (bpos < ret) {
  		__simple_printf("bpos < ret; %d < %d", bpos, ret);
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
+index 8377a32..597371b 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
+@@ -1,30 +1,90 @@
+ #include <stddef.h>
++#include <stdint.h>
++#include <stdbool.h>
+ #include <sys/errno.h>
+ 
+ #include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
+ #include <darling/emulation/conversion/dirent/getdirentries.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/conversion/fcntl/open.h>
+ #include <darling/emulation/conversion/common_at.h>
++#include <darling/emulation/conversion/stat/common.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/dirent/getdirentries.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/dup.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getuid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getgid.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
++/*
++ * getattrlist(2) for one file system object, packed the way XNU's vfs_attr_pack does:
++ * a length word, the returned-attributes set when asked for, then the fixed-size
++ * attributes in bit order, then the variable-length data they refer to. Everything
++ * stat(2) knows is answered; volume attributes and forks are not.
++ */
++
+ #define ATTR_BIT_MAP_COUNT 5
+ 
+-#define COMMON_SUPPORTED (ATTR_CMN_FNDRINFO | ATTR_CMN_OBJTAG)
+-#define VOLUME_SUPPORTED 0
+-#define DIR_SUPPORTED (ATTR_DIR_ENTRYCOUNT)
+-#define FILE_SUPPORTED (ATTR_FILE_RSRCLENGTH)
+-#define FORK_SUPPORTED 0
++#define ATTR_CMN_NAME               0x00000001
++#define ATTR_CMN_DEVID              0x00000002
++#define ATTR_CMN_FSID               0x00000004
++#define ATTR_CMN_OBJTYPE            0x00000008
++#define ATTR_CMN_OBJTAG             0x00000010
++#define ATTR_CMN_OBJID              0x00000020
++#define ATTR_CMN_OBJPERMANENTID     0x00000040
++#define ATTR_CMN_PAROBJID           0x00000080
++#define ATTR_CMN_SCRIPT             0x00000100
++#define ATTR_CMN_CRTIME             0x00000200
++#define ATTR_CMN_MODTIME            0x00000400
++#define ATTR_CMN_CHGTIME            0x00000800
++#define ATTR_CMN_ACCTIME            0x00001000
++#define ATTR_CMN_BKUPTIME           0x00002000
++#define ATTR_CMN_FNDRINFO           0x00004000
++#define ATTR_CMN_OWNERID            0x00008000
++#define ATTR_CMN_GRPID              0x00010000
++#define ATTR_CMN_ACCESSMASK         0x00020000
++#define ATTR_CMN_FLAGS              0x00040000
++#define ATTR_CMN_GEN_COUNT          0x00080000
++#define ATTR_CMN_DOCUMENT_ID        0x00100000
++#define ATTR_CMN_USERACCESS         0x00200000
++#define ATTR_CMN_EXTENDED_SECURITY  0x00400000
++#define ATTR_CMN_UUID               0x00800000
++#define ATTR_CMN_GRPUUID            0x01000000
++#define ATTR_CMN_FILEID             0x02000000
++#define ATTR_CMN_PARENTID           0x04000000
++#define ATTR_CMN_FULLPATH           0x08000000
++#define ATTR_CMN_ADDEDTIME          0x10000000
++#define ATTR_CMN_ERROR              0x20000000
++#define ATTR_CMN_DATA_PROTECT_FLAGS 0x40000000
++#define ATTR_CMN_RETURNED_ATTRS     0x80000000
++
++#define ATTR_DIR_LINKCOUNT          0x00000001
++#define ATTR_DIR_ENTRYCOUNT         0x00000002
++#define ATTR_DIR_MOUNTSTATUS        0x00000004
++#define ATTR_DIR_ALLOCSIZE          0x00000008
++#define ATTR_DIR_IOBLOCKSIZE        0x00000010
++#define ATTR_DIR_DATALENGTH         0x00000020
++
++#define ATTR_FILE_LINKCOUNT         0x00000001
++#define ATTR_FILE_TOTALSIZE         0x00000002
++#define ATTR_FILE_ALLOCSIZE         0x00000004
++#define ATTR_FILE_IOBLOCKSIZE       0x00000008
++#define ATTR_FILE_DEVTYPE           0x00000020
++#define ATTR_FILE_DATALENGTH        0x00000200
++#define ATTR_FILE_DATAALLOCSIZE     0x00000400
++#define ATTR_FILE_RSRCLENGTH        0x00001000
++#define ATTR_FILE_RSRCALLOCSIZE     0x00002000
+ 
+-#define ATTR_CMN_FNDRINFO 0x4000
+-#define ATTR_FILE_RSRCLENGTH 0x1000
+-#define ATTR_CMN_OBJTAG 0x00000010
+-#define ATTR_DIR_ENTRYCOUNT 0x00000002
++#define COMMON_SUPPORTED (~(uint32_t) ATTR_CMN_ERROR)
++#define VOLUME_SUPPORTED 0u
++#define DIR_SUPPORTED (ATTR_DIR_LINKCOUNT | ATTR_DIR_ENTRYCOUNT | ATTR_DIR_MOUNTSTATUS | ATTR_DIR_ALLOCSIZE | \
++	ATTR_DIR_IOBLOCKSIZE | ATTR_DIR_DATALENGTH)
++#define FILE_SUPPORTED (ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE | ATTR_FILE_IOBLOCKSIZE | \
++	ATTR_FILE_DEVTYPE | ATTR_FILE_DATALENGTH | ATTR_FILE_DATAALLOCSIZE | ATTR_FILE_RSRCLENGTH | ATTR_FILE_RSRCALLOCSIZE)
++#define FORK_SUPPORTED 0u
+ 
+ #define XATTR_FINDER_INFO "com.apple.FinderInfo"
+ #define XATTR_RESOURCE_FORK "com.apple.ResourceFork"
+@@ -33,12 +93,103 @@
+ #define FSOPT_REPORT_FULLSIZE 4
+ 
+ #define VT_HFS 16
++#define TEXT_ENCODING_UNICODE 0x7E
+ 
+-#define min(a,b) (((a) < (b)) ? (a) : (b))
++#ifndef LINUX_O_PATH
++#	define LINUX_O_PATH 010000000
++#endif
++
++#define LINUX_S_IFMT 0170000
+ 
+ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+ extern void *memset(void *s, int c, __SIZE_TYPE__ n);
+-extern char *strcpy(char *dest, const char *src);
++extern __SIZE_TYPE__ strlen(const char* s);
++
++struct attr_timespec
++{
++	int64_t tv_sec;
++	int64_t tv_nsec;
++};
++
++struct attr_cursor
++{
++	char* fixed; /* next fixed-size attribute */
++	char* var; /* next variable-length datum */
++};
++
++static void attr_put(struct attr_cursor* cursor, const void* value, __SIZE_TYPE__ size)
++{
++	memcpy(cursor->fixed, value, size);
++	cursor->fixed += size;
++}
++
++static void attr_put32(struct attr_cursor* cursor, uint32_t value)
++{
++	attr_put(cursor, &value, sizeof(value));
++}
++
++static void attr_put64(struct attr_cursor* cursor, uint64_t value)
++{
++	attr_put(cursor, &value, sizeof(value));
++}
++
++static void attr_put_time(struct attr_cursor* cursor, uint64_t sec, uint64_t nsec)
++{
++	struct attr_timespec time = { (int64_t) sec, (int64_t) nsec };
++	attr_put(cursor, &time, sizeof(time));
++}
++
++/* An attrreference_t: where the data lies, counted from the reference itself, and its length. */
++static void attr_put_variable(struct attr_cursor* cursor, const void* data, uint32_t length)
++{
++	int32_t offset = (int32_t)(cursor->var - cursor->fixed);
++
++	attr_put(cursor, &offset, sizeof(offset));
++	attr_put(cursor, &length, sizeof(length));
++	if (length > 0)
++		memcpy(cursor->var, data, length);
++	while (length & 3)
++		cursor->var[length++] = 0;
++	cursor->var += length;
++}
++
++/* XNU's vnode types, as fsobj_type_t reports them. */
++static uint32_t attr_object_type(unsigned int mode)
++{
++	switch (mode & LINUX_S_IFMT)
++	{
++		case 0100000: return 1; /* VREG */
++		case 0040000: return 2; /* VDIR */
++		case 0060000: return 3; /* VBLK */
++		case 0020000: return 4; /* VCHR */
++		case 0120000: return 5; /* VLNK */
++		case 0140000: return 6; /* VSOCK */
++		case 0010000: return 7; /* VFIFO */
++		default: return 0; /* VNON */
++	}
++}
++
++static __SIZE_TYPE__ attr_fixed_size(uint32_t common, uint32_t dir, uint32_t file)
++{
++	static const unsigned char common_sizes[32] = {
++		8, 4, 8, 4, 4, 8, 8, 8, 4, 16, 16, 16, 16, 16, 32, 4,
++		4, 4, 4, 4, 4, 4, 8, 16, 16, 8, 8, 8, 16, 4, 4, 20,
++	};
++	static const unsigned char dir_sizes[6] = { 4, 4, 4, 8, 4, 8 };
++	static const unsigned char file_sizes[14] = { 4, 8, 8, 4, 0, 4, 0, 0, 0, 8, 8, 0, 8, 8 };
++	__SIZE_TYPE__ size = 0;
++
++	for (int bit = 0; bit < 32; bit++)
++		if (common & (1u << bit))
++			size += common_sizes[bit];
++	for (int bit = 0; bit < 6; bit++)
++		if (dir & (1u << bit))
++			size += dir_sizes[bit];
++	for (int bit = 0; bit < 14; bit++)
++		if (file & (1u << bit))
++			size += file_sizes[bit];
++	return size;
++}
+ 
+ long
+ FUNC_NAME(int fd,
+@@ -49,133 +200,299 @@ const char* path,
+ 
+ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
+ {
+-	int rv;
+-	char *ourBuffer, *next;
+-	__SIZE_TYPE__ spaceNeeded = 4; // 4 bytes for the length header
++	long rv;
++	int object; /* descriptor of the object itself */
++	struct linux_stat st;
++	struct vchroot_fdpath_args guest;
++	char guest_path[4096];
++	char fd_path[40];
++	/* the fixed part is at most 388 bytes; the name and the path follow it */
++	char out[4 + 400 + 4096 + 4096 + 16];
++	struct attr_cursor cursor;
++	uint32_t common, dir, file, total;
++	const char* name;
++	uint32_t name_length, path_length;
++	uint64_t parent;
++	bool is_dir, is_root;
+ 
+ 	if (!alist)
+ 		return -EFAULT;
+-
+ #if HAS_PATH
+ 	if (!path)
+ 		return -EFAULT;
+-
+-	struct vchroot_expand_args vc;
+-	vc.flags = (options & FSOPT_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
+-	vc.dfd = atfd(fd);
+-
+-	strcpy(vc.path, path);
+-	rv = vchroot_expand(&vc);
+-	
+-	if (rv < 0)
+-		return rv;
+ #endif
+ 
+-	if (alist->bitmapcount < ATTR_BIT_MAP_COUNT)
++	if (alist->bitmapcount != ATTR_BIT_MAP_COUNT)
+ 		return -EINVAL;
+ 
+-	if ((alist->commonattr & COMMON_SUPPORTED) != alist->commonattr)
+-		return -EINVAL;
+-	if ((alist->volattr & VOLUME_SUPPORTED) != alist->volattr)
++	common = alist->commonattr;
++	dir = alist->dirattr;
++	file = alist->fileattr;
++	if (alist->volattr & ~VOLUME_SUPPORTED)
+ 		return -EINVAL;
+-	if ((alist->dirattr & DIR_SUPPORTED) != alist->dirattr)
++	if (alist->forkattr & ~FORK_SUPPORTED)
+ 		return -EINVAL;
+-	if ((alist->fileattr & FILE_SUPPORTED) != alist->fileattr)
+-		return -EINVAL;
+-	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
++	if (common & ATTR_CMN_RETURNED_ATTRS)
++	{
++		/* The caller learns from the returned set what was left out. */
++		common &= COMMON_SUPPORTED;
++		dir &= DIR_SUPPORTED;
++		file &= FILE_SUPPORTED;
++	}
++	else if ((common & ~COMMON_SUPPORTED) || (dir & ~DIR_SUPPORTED) || (file & ~FILE_SUPPORTED))
+ 		return -EINVAL;
+ 
+-	if (alist->commonattr & ATTR_CMN_FNDRINFO)
+-		spaceNeeded += 32;
+-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
+-		spaceNeeded += 8; // off_t
+-	if (alist->commonattr & ATTR_CMN_OBJTAG)
+-		spaceNeeded += sizeof(uint32_t); // fsobj_tag_t
+-	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT)
+-		spaceNeeded += sizeof(uint32_t);
+-
+-	ourBuffer = (char*) __builtin_alloca(spaceNeeded);
+-	next = ourBuffer + 4;
+-
+-	if (alist->commonattr & ATTR_CMN_FNDRINFO)
+-	{
+ #if HAS_PATH
+-		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, next, 32);
+-#else
+-		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, next, 32);
+-#endif
++	{
++		struct vchroot_expand_args vc;
++
++		if (strlen(path) >= sizeof(vc.path))
++			return -ENAMETOOLONG;
++		vc.flags = (options & FSOPT_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
++		vc.dfd = atfd(fd);
++		memcpy(vc.path, path, strlen(path) + 1);
++		rv = vchroot_expand(&vc);
+ 		if (rv < 0)
+-			memset(next, 0, 32);
+-		next += 32;
++			return errno_linux_to_bsd(rv);
++		object = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path,
++			LINUX_O_PATH | LINUX_O_CLOEXEC | ((options & FSOPT_NOFOLLOW) ? LINUX_O_NOFOLLOW : 0), 0);
++		if (object < 0)
++			return errno_linux_to_bsd(object);
+ 	}
+-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
+-	{
+-#if HAS_PATH
+-		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, NULL, 0);
+ #else
+-		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, NULL, 0);
++	object = fd;
+ #endif
+-		if (rv < 0)
+-			*((uint32_t*) next) = 0;
+-		else
+-			*((uint32_t*) next) = rv;
+-		next += 4;
++
++	rv = LINUX_SYSCALL(__NR_newfstatat, object, "", &st, LINUX_AT_EMPTY_PATH);
++	if (rv < 0)
++	{
++		rv = errno_linux_to_bsd(rv);
++		goto out;
+ 	}
++	is_dir = (st.st_mode & LINUX_S_IFMT) == 0040000;
++	if (is_dir)
++		file = 0;
++	else
++		dir = 0;
+ 
+-	if (alist->commonattr & ATTR_CMN_OBJTAG) {
+-		// pretend we're always on HFS
+-		*((uint32_t*)next) = VT_HFS;
+-		next += 4;
++	/* The object's own path as the guest sees it: its name is the last component. */
++	guest.fd = object;
++	guest.path = guest_path;
++	guest.maxlen = sizeof(guest_path);
++	if (vchroot_fdpath(&guest) < 0 || guest_path[0] != '/')
++	{
++		guest_path[0] = '/';
++		guest_path[1] = '\0';
+ 	}
++	path_length = strlen(guest_path);
++	while (path_length > 1 && guest_path[path_length - 1] == '/')
++		guest_path[--path_length] = '\0';
++	is_root = path_length == 1;
++	name = guest_path;
++	for (const char* p = guest_path; *p; p++)
++		if (*p == '/' && p[1])
++			name = p + 1;
++	if (is_root)
++		name = "Macintosh HD"; /* the root directory is named after its volume */
++	name_length = strlen(name);
+ 
+-	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT) {
+-		char buf[1024]; // maybe this should be smaller?
+-		int tmp_fd;
++	__simple_sprintf(fd_path, "/proc/self/fd/%d", object);
+ 
+-		*((uint32_t*)next) = 0;
++	parent = 1; /* the parent of a volume's root */
++	if (!is_root && (common & (ATTR_CMN_PAROBJID | ATTR_CMN_PARENTID)))
++	{
++		struct linux_stat parent_stat;
++		long got = -1;
+ 
+-#if HAS_PATH
+-		tmp_fd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, LINUX_O_RDONLY | LINUX_O_DIRECTORY, 0);
+-		if (tmp_fd < 0) {
+-			rv = -EIO; // translate all errors into EIO (to avoid confusing our caller)
+-			goto attr_dir_entrycount_out_no_fd;
+-		}
+-#else
+-		// dupe it to avoid advancing the internal `getdents` position if our caller is using that
+-		tmp_fd = sys_dup(fd);
+-		if (tmp_fd < 0) {
+-			rv = -EIO; // see above
+-			goto attr_dir_entrycount_out_no_fd;
+-		}
+-#endif
++		if (is_dir)
++			got = LINUX_SYSCALL(__NR_newfstatat, object, "..", &parent_stat, 0);
++		else
++		{
++			/* the directory part of the host path this descriptor was opened by */
++			char host[4096];
++			long length = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, fd_path, host, sizeof(host) - 1);
+ 
+-		while (1) {
+-			// there's basically no other way to do this (at least none that either i or the internet know of)
+-			rv = LINUX_SYSCALL(__NR_getdents64, tmp_fd, buf, sizeof(buf));
+-			if (rv < 0) {
+-				rv = -EIO; // same as before: avoid confusing our caller with unexepected errnos
+-				goto attr_dir_entrycount_out;
+-			} else if (rv == 0) {
+-				break;
++			while (length > 1 && host[length - 1] != '/')
++				length--;
++			if (length >= 1)
++			{
++				host[length] = '\0';
++				got = LINUX_SYSCALL(__NR_newfstatat, LINUX_AT_FDCWD, host, &parent_stat, 0);
+ 			}
++		}
++		parent = got == 0 ? parent_stat.st_ino : 0;
++	}
++
++	memset(out, 0, sizeof(out));
++	cursor.fixed = out + 4;
++	cursor.var = cursor.fixed + attr_fixed_size(common, dir, file);
+ 
+-			for (char* iter = buf; iter < buf + rv; iter += ((struct linux_dirent64*)iter)->d_reclen) {
+-				++(*((uint32_t*)next));
++	if (common & ATTR_CMN_RETURNED_ATTRS)
++	{
++		attr_put32(&cursor, common);
++		attr_put32(&cursor, 0);
++		attr_put32(&cursor, dir);
++		attr_put32(&cursor, file);
++		attr_put32(&cursor, 0);
++	}
++	if (common & ATTR_CMN_NAME)
++		attr_put_variable(&cursor, name, name_length + 1);
++	if (common & ATTR_CMN_DEVID)
++		attr_put32(&cursor, (uint32_t) st.st_dev);
++	if (common & ATTR_CMN_FSID)
++	{
++		attr_put32(&cursor, (uint32_t) st.st_dev);
++		attr_put32(&cursor, VT_HFS);
++	}
++	if (common & ATTR_CMN_OBJTYPE)
++		attr_put32(&cursor, attr_object_type(st.st_mode));
++	if (common & ATTR_CMN_OBJTAG)
++		attr_put32(&cursor, VT_HFS); // pretend we're always on HFS
++	if (common & ATTR_CMN_OBJID)
++	{
++		attr_put32(&cursor, (uint32_t) st.st_ino);
++		attr_put32(&cursor, 0);
++	}
++	if (common & ATTR_CMN_OBJPERMANENTID)
++	{
++		attr_put32(&cursor, (uint32_t) st.st_ino);
++		attr_put32(&cursor, 0);
++	}
++	if (common & ATTR_CMN_PAROBJID)
++	{
++		attr_put32(&cursor, (uint32_t) parent);
++		attr_put32(&cursor, 0);
++	}
++	if (common & ATTR_CMN_SCRIPT)
++		attr_put32(&cursor, TEXT_ENCODING_UNICODE);
++	if (common & ATTR_CMN_CRTIME)
++		attr_put_time(&cursor, st.st_mtime < st.st_ctime ? st.st_mtime : st.st_ctime,
++			st.st_mtime < st.st_ctime ? st.st_mtime_nsec : st.st_ctime_nsec);
++	if (common & ATTR_CMN_MODTIME)
++		attr_put_time(&cursor, st.st_mtime, st.st_mtime_nsec);
++	if (common & ATTR_CMN_CHGTIME)
++		attr_put_time(&cursor, st.st_ctime, st.st_ctime_nsec);
++	if (common & ATTR_CMN_ACCTIME)
++		attr_put_time(&cursor, st.st_atime, st.st_atime_nsec);
++	if (common & ATTR_CMN_BKUPTIME)
++		attr_put_time(&cursor, 0, 0);
++	if (common & ATTR_CMN_FNDRINFO)
++	{
++		/* stays zero when the object has none */
++		LINUX_SYSCALL(__NR_getxattr, fd_path, XATTR_FINDER_INFO, cursor.fixed, 32);
++		cursor.fixed += 32;
++	}
++	if (common & ATTR_CMN_OWNERID)
++		attr_put32(&cursor, sys_getuid()); /* as stat reports: in the container everything is ours */
++	if (common & ATTR_CMN_GRPID)
++		attr_put32(&cursor, sys_getgid());
++	if (common & ATTR_CMN_ACCESSMASK)
++		attr_put32(&cursor, st.st_mode & 07777);
++	if (common & ATTR_CMN_FLAGS)
++		attr_put32(&cursor, 0);
++	if (common & ATTR_CMN_GEN_COUNT)
++		attr_put32(&cursor, 0);
++	if (common & ATTR_CMN_DOCUMENT_ID)
++		attr_put32(&cursor, 0);
++	if (common & ATTR_CMN_USERACCESS)
++	{
++		uint32_t access = 0;
++
++		for (int mode = 1; mode <= 4; mode <<= 1) /* X_OK, W_OK, R_OK */
++			if (LINUX_SYSCALL(__NR_faccessat, LINUX_AT_FDCWD, fd_path, mode) == 0)
++				access |= mode;
++		attr_put32(&cursor, access);
++	}
++	if (common & ATTR_CMN_EXTENDED_SECURITY)
++		attr_put_variable(&cursor, NULL, 0); /* no access control list */
++	if (common & ATTR_CMN_UUID)
++		cursor.fixed += 16; /* the null GUID */
++	if (common & ATTR_CMN_GRPUUID)
++		cursor.fixed += 16;
++	if (common & ATTR_CMN_FILEID)
++		attr_put64(&cursor, st.st_ino);
++	if (common & ATTR_CMN_PARENTID)
++		attr_put64(&cursor, parent);
++	if (common & ATTR_CMN_FULLPATH)
++		attr_put_variable(&cursor, guest_path, path_length + 1);
++	if (common & ATTR_CMN_ADDEDTIME)
++		attr_put_time(&cursor, st.st_ctime, st.st_ctime_nsec);
++	if (common & ATTR_CMN_DATA_PROTECT_FLAGS)
++		attr_put32(&cursor, 0);
++
++	if (dir & ATTR_DIR_LINKCOUNT)
++		attr_put32(&cursor, (uint32_t) st.st_nlink);
++	if (dir & ATTR_DIR_ENTRYCOUNT)
++	{
++		char buf[1024];
++		uint32_t count = 0;
++		int listing = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, fd_path, LINUX_O_RDONLY | LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
++
++		if (listing >= 0)
++		{
++			long got;
++
++			// there's basically no other way to do this (at least none that either i or the internet know of)
++			while ((got = LINUX_SYSCALL(__NR_getdents64, listing, buf, sizeof(buf))) > 0)
++			{
++				for (char* iter = buf; iter < buf + got; iter += ((struct linux_dirent64*) iter)->d_reclen)
++				{
++					const char* entry = ((struct linux_dirent64*) iter)->d_name;
++					if (entry[0] == '.' && (entry[1] == '\0' || (entry[1] == '.' && entry[2] == '\0')))
++						continue;
++					count++;
++				}
+ 			}
++			close_internal(listing);
+ 		}
+-
+-attr_dir_entrycount_out:
+-		close_internal(tmp_fd);
+-attr_dir_entrycount_out_no_fd:
+-		next += 4;
++		attr_put32(&cursor, count);
+ 	}
++	if (dir & ATTR_DIR_MOUNTSTATUS)
++		attr_put32(&cursor, is_root ? 1 /* DIR_MNTSTATUS_MNTPOINT */ : 0);
++	if (dir & ATTR_DIR_ALLOCSIZE)
++		attr_put64(&cursor, (uint64_t) st.st_blocks * 512);
++	if (dir & ATTR_DIR_IOBLOCKSIZE)
++		attr_put32(&cursor, (uint32_t) st.st_blksize);
++	if (dir & ATTR_DIR_DATALENGTH)
++		attr_put64(&cursor, (uint64_t) st.st_size);
+ 
+-	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
+-		bufferSize = spaceNeeded;
++	if (file & ATTR_FILE_LINKCOUNT)
++		attr_put32(&cursor, (uint32_t) st.st_nlink);
++	if (file & ATTR_FILE_TOTALSIZE)
++		attr_put64(&cursor, (uint64_t) st.st_size);
++	if (file & ATTR_FILE_ALLOCSIZE)
++		attr_put64(&cursor, (uint64_t) st.st_blocks * 512);
++	if (file & ATTR_FILE_IOBLOCKSIZE)
++		attr_put32(&cursor, (uint32_t) st.st_blksize);
++	if (file & ATTR_FILE_DEVTYPE)
++		attr_put32(&cursor, (uint32_t) st.st_rdev);
++	if (file & ATTR_FILE_DATALENGTH)
++		attr_put64(&cursor, (uint64_t) st.st_size);
++	if (file & ATTR_FILE_DATAALLOCSIZE)
++		attr_put64(&cursor, (uint64_t) st.st_blocks * 512);
++	if (file & (ATTR_FILE_RSRCLENGTH | ATTR_FILE_RSRCALLOCSIZE))
++	{
++		long length = LINUX_SYSCALL(__NR_getxattr, fd_path, XATTR_RESOURCE_FORK, NULL, 0);
++
++		if (length < 0)
++			length = 0;
++		if (file & ATTR_FILE_RSRCLENGTH)
++			attr_put64(&cursor, (uint64_t) length);
++		if (file & ATTR_FILE_RSRCALLOCSIZE)
++			attr_put64(&cursor, ((uint64_t) length + 4095) & ~4095ULL);
++	}
+ 
+-	*((uint32_t*) ourBuffer) = bufferSize;
++	total = (uint32_t)(cursor.var - out);
++	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < total)
++		*((uint32_t*) out) = (uint32_t) bufferSize;
++	else
++		*((uint32_t*) out) = total;
++	memcpy(attributeBuffer, out, bufferSize < total ? bufferSize : total);
++	rv = 0;
+ 
+-	memcpy(attributeBuffer, ourBuffer, min(bufferSize, spaceNeeded));
+-	
+-	return 0;
++out:
++#if HAS_PATH
++	close_internal(object);
++#endif
++	return rv;
+ }
