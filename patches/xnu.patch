@@ -12446,7 +12446,7 @@ index 0000000..a1860b5
 +
 +struct mach_header_words { unsigned int bits, size, remote, local, voucher, id; };
 +
-+static void put_message(struct line* l, long message, bool body)
++static void put_message(struct line* l, long message, unsigned long sent)
 +{
 +	unsigned char data[512];
 +	struct mach_header_words header;
@@ -12463,8 +12463,8 @@ index 0000000..a1860b5
 +	put_number(l, header.size, 10);
 +	put(l, " port=");
 +	put_hex(l, header.remote);
-+	if (!body)
-+		return;
++	if (sent) /* a request: the trap carries its size, the header need not */
++		header.size = sent;
 +	if (header.size < (unsigned long) n)
 +		n = header.size;
 +	if (n <= (long) sizeof(header))
@@ -12492,7 +12492,7 @@ index 0000000..a1860b5
 +	if (!message_trap(nr) || !(args[1] & 1 /* MACH_SEND_MSG */) || !traced(sp, hits, &count))
 +		return;
 +	begin(&l, "msg-send", nr, hits, count);
-+	put_message(&l, args[0], true);
++	put_message(&l, args[0], (unsigned int) args[2]);
 +	finish(&l);
 +}
 +
@@ -12512,7 +12512,7 @@ index 0000000..a1860b5
 +		put(&l, " ret=");
 +		put_hex(&l, ret);
 +		if (ret == 0)
-+			put_message(&l, args[0], true);
++			put_message(&l, args[0], 0);
 +	}
 +	else
 +	{
