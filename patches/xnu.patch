@@ -3072,10 +3072,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..de128a9
+index 0000000..13c450a
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,758 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3571,7 +3571,34 @@ index 0000000..de128a9
 +	return sys_symlinkat(target, fd, link);
 +}
 +
-+/* One APFS data volume and devfs, as on a Mac. */
++/* The volumes of a macOS 14 install: the system volume at /, and the data, preboot,
++ * update and swap volumes of the same APFS container below /System/Volumes. */
++static const struct mac_volume { const char* on; const char* from; } mac_volumes[] = {
++	{ "/System/Volumes/VM", "/dev/disk1s6" },
++	{ "/System/Volumes/Preboot", "/dev/disk1s2" },
++	{ "/System/Volumes/Update", "/dev/disk1s4" },
++	{ "/System/Volumes/Data", "/dev/disk1s5" },
++};
++#define MAC_VOLUME_COUNT ((long) (sizeof(mac_volumes) / sizeof(mac_volumes[0])))
++
++/* The volume a path given by name lies on, or NULL for the system volume. What a
++ * user or an application writes is on the data volume, linked into the root. */
++static const struct mac_volume* mac_volume_of(const char* path)
++{
++	static const char* const data[] = {
++		"/Users", "/Applications", "/Library", "/private", "/Volumes", "/usr/local", "/opt", "/cores",
++		"/tmp", "/var", "/etc",
++	};
++
++	for (long i = 0; i < MAC_VOLUME_COUNT; i++)
++		if (path_under(path, mac_volumes[i].on, strlen(mac_volumes[i].on)))
++			return &mac_volumes[i];
++	for (size_t i = 0; i < sizeof(data) / sizeof(data[0]); i++)
++		if (path_under(path, data[i], strlen(data[i])))
++			return &mac_volumes[MAC_VOLUME_COUNT - 1];
++	return NULL;
++}
++
 +static void mac_fs_names(const char* mounted_on, char* type, char* from, char* on, size_t on_size)
 +{
 +	if (path_under(mounted_on, "/dev", 4))
@@ -3611,7 +3638,15 @@ index 0000000..de128a9
 +	HIDE(AT_CWD_LINUX, path, true);
 +	long rv = sys_statfs(path, buf);
 +	if (rv == 0 && darling_guest_view_active())
++	{
++		const struct mac_volume* volume = path != NULL ? mac_volume_of(path) : NULL;
 +		mac_statfs(buf);
++		if (volume != NULL && strcmp(buf->f_fstypename, "apfs") == 0)
++		{
++			strcpy(buf->f_mntfromname, volume->from);
++			strcpy(buf->f_mntonname, volume->on);
++		}
++	}
 +	return rv;
 +}
 +
@@ -3620,7 +3655,15 @@ index 0000000..de128a9
 +	HIDE(AT_CWD_LINUX, path, true);
 +	long rv = sys_statfs64(path, buf);
 +	if (rv == 0 && darling_guest_view_active())
++	{
++		const struct mac_volume* volume = path != NULL ? mac_volume_of(path) : NULL;
 +		mac_statfs64(buf);
++		if (volume != NULL && strcmp(buf->f_fstypename, "apfs") == 0)
++		{
++			strcpy(buf->f_mntfromname, volume->from);
++			strcpy(buf->f_mntonname, volume->on);
++		}
++	}
 +	return rv;
 +}
 +
@@ -3648,9 +3691,11 @@ index 0000000..de128a9
 +long guarded_getfsstat64(struct bsd_statfs64* buf, int bufsize, int flags)
 +{
 +	long count = sys_getfsstat64(buf, bufsize, flags);
-+	if (count <= 0 || buf == NULL || !darling_guest_view_active())
++	if (count <= 0 || !darling_guest_view_active())
 +		return count;
-+	long kept = 0;
++	if (buf == NULL)
++		return 2 + MAC_VOLUME_COUNT; /* a count query: /, /dev and the volumes */
++	long kept = 0, root = -1;
 +	for (long i = 0; i < count; i++)
 +	{
 +		if (!mac_mount(buf[i].f_mntonname))
@@ -3658,6 +3703,20 @@ index 0000000..de128a9
 +		if (kept != i)
 +			memcpy(&buf[kept], &buf[i], sizeof(buf[i]));
 +		mac_statfs64(&buf[kept]);
++		if (strcmp(buf[kept].f_mntonname, "/") == 0)
++			root = kept;
++		kept++;
++	}
++	/* The other volumes share the container, so they report the root's space. */
++	for (long i = 0; root >= 0 && i < MAC_VOLUME_COUNT; i++)
++	{
++		if ((kept + 1) * (long) sizeof(buf[0]) > bufsize)
++			break;
++		memcpy(&buf[kept], &buf[root], sizeof(buf[0]));
++		memset(buf[kept].f_mntfromname, 0, sizeof(buf[kept].f_mntfromname));
++		memset(buf[kept].f_mntonname, 0, sizeof(buf[kept].f_mntonname));
++		strcpy(buf[kept].f_mntfromname, mac_volumes[i].from);
++		strcpy(buf[kept].f_mntonname, mac_volumes[i].on);
 +		kept++;
 +	}
 +	return kept;
@@ -4979,7 +5038,7 @@ index 4319355..6186a48 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..d2296a1 100644
+index 8fabdda..c01762f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 @@ -11,17 +11,25 @@
@@ -5018,7 +5077,7 @@ index 8fabdda..d2296a1 100644
  
  struct linux_ifconf {
  	int lifc_len;
-@@ -88,10 +97,253 @@ const struct known_sysctl sysctls_net[] = {
+@@ -88,10 +97,256 @@ const struct known_sysctl sysctls_net[] = {
  	{ .oid = -1 },
  };
  
@@ -5208,6 +5267,7 @@ index 8fabdda..d2296a1 100644
 +	{ "gif0", 0x8010, 0x37, false }, { "stf0", 0x0000, 0x39, false },
 +	{ "anpi1", 0x8863, 6, true }, { "anpi0", 0x8863, 6, true },
 +	{ "en3", 0x8963, 6, true }, { "en4", 0x8963, 6, true }, { "en1", 0x8963, 6, true }, { "en2", 0x8963, 6, true },
++	{ "en5", 0x8963, 6, true }, { "en6", 0x8863, 6, true },
 +	{ "ap1", 0x8802, 6, true }, { "awdl0", 0x8843, 6, true }, { "llw0", 0x8863, 6, true },
 +	{ "bridge0", 0x8863, 0xd1, true },
 +	{ "utun0", 0x8051, 1, false }, { "utun1", 0x8051, 1, false }, { "utun2", 0x8051, 1, false }, { "utun3", 0x8051, 1, false },
@@ -5260,6 +5320,8 @@ index 8fabdda..d2296a1 100644
 +			if (alen) {
 +				if (fixed_en1 && strcmp(phantom->name, "en1") == 0)
 +					memcpy(LLADDR(dl), en1_mac, MAC_LENGTH);
++				else if (strcmp(phantom->name, "en6") == 0) /* the T2 chip's link: the same on every Mac */
++					memcpy(LLADDR(dl), "\xac\xde\x48\x00\x11\x22", MAC_LENGTH);
 +				else
 +					phantom_mac(en0_mac, phantom->name, (unsigned char*) LLADDR(dl));
 +			}
@@ -5272,7 +5334,7 @@ index 8fabdda..d2296a1 100644
  static int do_iflist(void* old, unsigned long* oldlen) {
  	// we only do IPv4 addresses for now
  	int tmp_sock;
-@@ -107,19 +359,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -107,19 +362,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
  		goto out;
  
@@ -5313,7 +5375,7 @@ index 8fabdda..d2296a1 100644
  
  		if (old && *oldlen >= total_len + ifm_length) {
  			struct if_msghdr* ifm = (void*)old_ptr;
-@@ -142,13 +412,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -142,13 +415,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  			dl->sdl_alen = MAC_LENGTH;
  			dl->sdl_slen = 0; // ???
  
@@ -5349,7 +5411,7 @@ index 8fabdda..d2296a1 100644
  
  			old_ptr += ifm_length;
  		}
-@@ -188,6 +479,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -188,6 +482,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  		total_len += ifam_length;
  	}
  
@@ -6890,7 +6952,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..17fcaf0 100644
+index c2f70fb..5f713a3 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -27,6 +27,8 @@
@@ -6957,7 +7019,190 @@ index c2f70fb..17fcaf0 100644
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
  					callnum);
-@@ -328,6 +367,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -113,8 +152,182 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize);
+ 
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/mac_processes.h>
++
++int darling_mac_process_count(void)
++{
++	return sizeof(darling_mac_processes) / sizeof(darling_mac_processes[0]);
++}
++
++const struct darling_mac_process* darling_mac_process_at(int index)
++{
++	const struct darling_mac_process* process;
++
++	if (index < 0 || index >= darling_mac_process_count() || !darling_guest_view_active())
++		return NULL;
++	process = &darling_mac_processes[index];
++	/* A real process with this pid is the one applications see. */
++	if (process->pid > 0 && LINUX_SYSCALL(__NR_kill, process->pid, 0) != -3 /* ESRCH */)
++		return NULL;
++	return process;
++}
++
++const struct darling_mac_process* darling_mac_process_find(int pid)
++{
++	if (pid < 0)
++		return NULL;
++	for (int i = 0; i < darling_mac_process_count(); i++)
++		if (darling_mac_processes[i].pid == pid)
++			return darling_mac_process_at(i);
++	return NULL;
++}
++
++int darling_mac_process_uid(const struct darling_mac_process* process)
++{
++	return process->uid < 0 ? sys_getuid() : process->uid;
++}
++
++const char* darling_mac_process_name(const struct darling_mac_process* process)
++{
++	const char* name = process->path;
++
++	for (const char* q = process->path; *q; q++)
++		if (*q == '/')
++			name = q + 1;
++	return name;
++}
++
++void darling_mac_process_listing_begin(struct darling_mac_process_listing* listing)
++{
++	struct linux_dirent64
++	{
++		uint64_t d_ino;
++		int64_t d_off;
++		unsigned short d_reclen;
++		unsigned char d_type;
++		char d_name[];
++	};
++	char dents[4096], name[64];
++	long fd, got;
++
++	memset(listing, 0, sizeof(*listing));
++	if (!darling_guest_view_active())
++		return;
++	fd = LINUX_SYSCALL(__NR_open, "/proc", 0200000 /* O_DIRECTORY */ | 02000000 /* O_CLOEXEC */, 0);
++	if (fd < 0)
++		return;
++	while ((got = LINUX_SYSCALL(__NR_getdents64, fd, dents, sizeof(dents))) > 0)
++	{
++		for (long pos = 0; pos < got;)
++		{
++			struct linux_dirent64* dent = (struct linux_dirent64*) (dents + pos);
++			int pid = 0, chosen = -1;
++			const char* c = dent->d_name;
++
++			pos += dent->d_reclen;
++			for (; *c >= '0' && *c <= '9'; c++)
++				pid = pid * 10 + (*c - '0');
++			if (*c || pid <= 0 || !darling_process_name(pid, name, sizeof(name)))
++				continue;
++			for (int i = 0; i < darling_mac_process_count(); i++)
++			{
++				if ((listing->hidden[i / 8] >> (i % 8)) & 1)
++					continue;
++				if (strcmp(darling_mac_process_name(&darling_mac_processes[i]), name) != 0)
++					continue;
++				if (chosen < 0 || darling_mac_processes[i].uid < 0)
++					chosen = i;
++				if (darling_mac_processes[i].uid < 0)
++					break;
++			}
++			if (chosen >= 0)
++				listing->hidden[chosen / 8] |= 1 << (chosen % 8);
++		}
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++}
++
++const struct darling_mac_process* darling_mac_process_listed(const struct darling_mac_process_listing* listing, int index)
++{
++	if (index < 0 || index >= darling_mac_process_count() || ((listing->hidden[index / 8] >> (index % 8)) & 1))
++		return NULL;
++	return darling_mac_process_at(index);
++}
++
++_Static_assert(sizeof(darling_mac_processes) / sizeof(darling_mac_processes[0]) <= 64 * 8, "listing bitmap too small");
++
++/* What any process may ask about another one; the rest needs rights nobody has. */
++static long mac_process_pidinfo(const struct darling_mac_process* process, uint32_t flavor, void* buffer, int32_t bufsize)
++{
++	int uid = darling_mac_process_uid(process);
++	int gid = process->uid < 0 ? sys_getgid() : process->uid;
++
++	switch (flavor)
++	{
++		case PROC_PIDT_SHORTBSDINFO:
++		{
++			struct proc_bsdshortinfo* info = (struct proc_bsdshortinfo*) buffer;
++			if (bufsize < (int32_t) sizeof(*info))
++				return -ENOSPC;
++			memset(info, 0, sizeof(*info));
++			info->pbsi_pid = process->pid;
++			info->pbsi_ppid = process->ppid;
++			info->pbsi_pgid = process->pid;
++			info->pbsi_status = SRUN;
++			info->pbsi_flags = P_LP64;
++			info->pbsi_uid = info->pbsi_ruid = info->pbsi_svuid = uid;
++			info->pbsi_gid = info->pbsi_rgid = info->pbsi_svgid = gid;
++			strncpy(info->pbsi_comm, darling_mac_process_name(process), sizeof(info->pbsi_comm) - 1);
++			return sizeof(*info);
++		}
++		case PROC_PIDTBSDINFO:
++		{
++			struct proc_bsdinfo* info = (struct proc_bsdinfo*) buffer;
++			struct proc_bsdinfo first;
++			if (bufsize < (int32_t) sizeof(*info))
++				return -ENOSPC;
++			memset(info, 0, sizeof(*info));
++			info->pbi_pid = process->pid;
++			info->pbi_ppid = process->ppid;
++			info->pbi_pgid = process->pid;
++			info->pbi_status = SRUN;
++			info->pbi_flags = P_LP64;
++			info->pbi_uid = info->pbi_ruid = info->pbi_svuid = uid;
++			info->pbi_gid = info->pbi_rgid = info->pbi_svgid = gid;
++			strncpy(info->pbi_comm, darling_mac_process_name(process), sizeof(info->pbi_comm) - 1);
++			strncpy(info->pbi_name, darling_mac_process_name(process), sizeof(info->pbi_name) - 1);
++			/* Started in pid order, right after the session's first process. */
++			if (_proc_pidinfo(1, PROC_PIDTBSDINFO, 0, &first, sizeof(first)) > 0)
++				info->pbi_start_tvsec = first.pbi_start_tvsec + process->pid / 40;
++			info->pbi_start_tvusec = (uint32_t) (process->pid * 7919u) % 1000000u;
++			return sizeof(*info);
++		}
++		case PROC_PIDUNIQIDENTIFIERINFO:
++		{
++			struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
++			if (bufsize < (int32_t) sizeof(*info))
++				return -ENOSPC;
++			memset(info, 0, sizeof(*info));
++			info->p_uniqueid = process->pid;
++			info->p_puniqueid = process->ppid;
++			return 1;
++		}
++		case PROC_PIDPATHINFO:
++			if (process->pid == 0)
++				return -ESRCH; /* the kernel has no executable path */
++			strncpy(buffer, process->path, bufsize);
++			return strlen(process->path);
++		default:
++			return -EPERM;
++	}
++}
++
+ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
+ {
++	const struct darling_mac_process* mac = darling_mac_process_find(pid);
++
++	if (mac != NULL)
++		return mac_process_pidinfo(mac, flavor, buffer, bufsize);
+ 	switch (flavor)
+ 	{
+ 		// arg is a memory location we want to know about
+@@ -328,6 +541,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -6966,7 +7211,7 @@ index c2f70fb..17fcaf0 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -388,9 +429,10 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -388,9 +603,10 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto reterr
  
@@ -6979,7 +7224,7 @@ index c2f70fb..17fcaf0 100644
  
  	// process state
  	READELEM();
-@@ -827,3 +869,217 @@ bail:
+@@ -827,3 +1043,241 @@ bail:
  	close_internal(fd);
  	return count * sizeof(uint64_t);
  }
@@ -7164,6 +7409,30 @@ index c2f70fb..17fcaf0 100644
 +	LINUX_SYSCALL(__NR_close, fd);
 +	if (got < 0)
 +		return errno_linux_to_bsd(got);
++	struct darling_mac_process_listing listing;
++	darling_mac_process_listing_begin(&listing);
++	for (int i = 0; i < darling_mac_process_count(); i++)
++	{
++		const struct darling_mac_process* mac = darling_mac_process_listed(&listing, i);
++		bool listed;
++
++		if (mac == NULL)
++			continue;
++		switch (type)
++		{
++			case PROC_ALL_PIDS: listed = true; break;
++			case PROC_PGRP_ONLY: listed = (uint32_t) mac->pid == typeinfo; break;
++			case PROC_PPID_ONLY: listed = mac->pid != 0 && (uint32_t) mac->ppid == typeinfo; break;
++			case PROC_UID_ONLY:
++			case PROC_RUID_ONLY: listed = (uint32_t) darling_mac_process_uid(mac) == typeinfo; break;
++			default: listed = false;
++		}
++		if (!listed)
++			continue;
++		count++;
++		if (buffer != NULL && (stored + 1) * (int32_t) sizeof(int) <= bufsize)
++			buffer[stored++] = mac->pid;
++	}
 +	/* As XNU: a size query gets room for a few more processes. */
 +	if (buffer == NULL)
 +		return (count + 20) * (long) sizeof(int);
@@ -11110,7 +11379,7 @@ index 0000000..f185f6c
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
-index 6600da7..ee10fb4 100644
+index 6600da7..9e87266 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 @@ -31,6 +31,7 @@ struct kinfo_proc_chain
@@ -11121,7 +11390,55 @@ index 6600da7..ee10fb4 100644
  
  extern void free(void* ptr);
  extern void* malloc(__SIZE_TYPE__ len);
-@@ -215,7 +216,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+@@ -97,6 +98,47 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+ 		}
+ 	}
+ 
++	struct darling_mac_process_listing listing;
++	darling_mac_process_listing_begin(&listing);
++	for (int i = 0; i < darling_mac_process_count(); i++)
++	{
++		const struct darling_mac_process* mac = darling_mac_process_listed(&listing, i);
++		struct kinfo_proc_chain* cur;
++		int uid;
++
++		if (mac == NULL)
++			continue;
++		uid = darling_mac_process_uid(mac);
++		switch (what)
++		{
++			case KERN_PROC_ALL: break;
++			case KERN_PROC_PID: if (flag != mac->pid) continue; break;
++			case KERN_PROC_PGRP: if (flag != mac->pid) continue; break;
++			case KERN_PROC_UID:
++			case KERN_PROC_RUID: if (flag != uid) continue; break;
++			default: continue;
++		}
++		nproc++;
++		if (what == KERN_PROC_ALL && *buflen == 0)
++			continue;
++		cur = (struct kinfo_proc_chain*) malloc(sizeof(*cur));
++		memset(cur, 0, sizeof(*cur));
++		cur->kinfo.kp_proc.p_pid = mac->pid;
++		cur->kinfo.kp_proc.p_flag = P_LP64;
++		cur->kinfo.kp_proc.p_stat = SRUN;
++		strncpy(cur->kinfo.kp_proc.p_comm, darling_mac_process_name(mac), sizeof(cur->kinfo.kp_proc.p_comm) - 1);
++		cur->kinfo.kp_eproc.e_ppid = mac->ppid;
++		cur->kinfo.kp_eproc.e_pgid = mac->pid;
++		cur->kinfo.kp_eproc.e_pcred.p_ruid = cur->kinfo.kp_eproc.e_pcred.p_svuid = uid;
++		cur->kinfo.kp_eproc.e_pcred.p_rgid = cur->kinfo.kp_eproc.e_pcred.p_svgid = mac->uid < 0 ? sys_getgid() : mac->uid;
++		cur->kinfo.kp_eproc.e_ucred.cr_uid = uid;
++		if (first == NULL)
++			first = cur;
++		if (last != NULL)
++			last->next = cur;
++		last = cur;
++	}
++
+ 	if (*buflen < nproc*sizeof(struct kinfo_proc))
+ 	{
+ 		*buflen = nproc*sizeof(struct kinfo_proc);
+@@ -215,7 +257,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
  
  	// comm
  	READELEM();
@@ -11132,3 +11449,366 @@ index 6600da7..ee10fb4 100644
  
  	// process state
  	READELEM();
+@@ -342,6 +386,10 @@ int _sysctl_procargs(int pid, char* buf, unsigned long* buflen)
+ 	int argc = 0, i, arg0len = 0, argslen = 0;
+ 	int totallen, ret = 0;
+ 
++	/* As on a Mac for a process the caller may not inspect. */
++	if (darling_mac_process_find(pid) != NULL)
++		return -EINVAL;
++
+ 	__simple_sprintf(path, "/proc/%d/cmdline", pid);
+ 
+ 	if (!read_string(path, cmdline, sizeof(cmdline)))
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
+index 407996e..e41ac1b 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
+@@ -8,4 +8,35 @@ bool read_string(const char* path, char* dst, int maxlen);
+ const char* next_stat_elem(char** buf);
+ void skip_stat_elems(char** buf, int count);
+ 
++/*
++ * darling-lol: the system processes of a logged-in Mac (kernel_task, WindowServer,
++ * Dock, ...), which a Darling session does not run. With host.hide they are listed
++ * next to the session's own processes and answer the queries any process may make
++ * about another (name, path, owner); they cannot be signalled or inspected further.
++ * A real process with the same pid takes its place.
++ */
++struct darling_mac_process
++{
++	int pid, ppid;
++	int uid; /* -1: the session's user */
++	const char* path;
++};
++int darling_mac_process_count(void);
++/* The entry at index, or NULL when it is not shown (view inactive, pid in use). */
++const struct darling_mac_process* darling_mac_process_at(int index);
++/*
++ * For listings: the session's own process names, so that a daemon the session really
++ * runs (cfprefsd, trustd, ...) is not listed a second time. Each running name hides
++ * one table entry, the session user's if there is one.
++ */
++struct darling_mac_process_listing
++{
++	unsigned char hidden[64]; /* bit per table index */
++};
++void darling_mac_process_listing_begin(struct darling_mac_process_listing* listing);
++const struct darling_mac_process* darling_mac_process_listed(const struct darling_mac_process_listing* listing, int index);
++const struct darling_mac_process* darling_mac_process_find(int pid);
++int darling_mac_process_uid(const struct darling_mac_process* process);
++const char* darling_mac_process_name(const struct darling_mac_process* process);
++
+ #endif // _SYSCTL_PROC_H
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h
+new file mode 100644
+index 0000000..aa6d64c
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/mac_processes.h
+@@ -0,0 +1,279 @@
++/* Generated by tools/build-mac-processes.py; do not edit. */
++static const struct darling_mac_process darling_mac_processes[] = {
++	{ 0, 0, 0, "/kernel_task" },
++	{ 80, 1, 0, "/usr/libexec/logd" },
++	{ 84, 1, 0, "/usr/libexec/smd" },
++	{ 88, 1, 0, "/usr/libexec/UserEventAgent" },
++	{ 92, 1, 0, "/System/Library/PrivateFrameworks/Uninstall.framework/Resources/uninstalld" },
++	{ 96, 1, 0, "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd" },
++	{ 100, 1, 0, "/System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted" },
++	{ 104, 1, 0, "/usr/sbin/systemstats" },
++	{ 108, 1, 0, "/usr/libexec/configd" },
++	{ 112, 1, 0, "/System/Library/CoreServices/powerd.bundle/powerd" },
++	{ 116, 1, 0, "/usr/libexec/remoted" },
++	{ 120, 1, 0, "/usr/libexec/watchdogd" },
++	{ 124, 1, 0, "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds" },
++	{ 128, 1, 0, "/usr/libexec/kernelmanagerd" },
++	{ 132, 1, 0, "/usr/libexec/diskarbitrationd" },
++	{ 136, 1, 0, "/usr/sbin/syslogd" },
++	{ 140, 1, 0, "/usr/libexec/thermalmonitord" },
++	{ 144, 1, 0, "/usr/libexec/opendirectoryd" },
++	{ 148, 1, 0, "/System/Library/PrivateFrameworks/ApplePushService.framework/apsd" },
++	{ 152, 1, 0, "/System/Library/CoreServices/launchservicesd" },
++	{ 156, 1, 24, "/usr/libexec/timed" },
++	{ 160, 1, 213, "/usr/libexec/usbmuxd" },
++	{ 164, 1, 0, "/usr/sbin/securityd" },
++	{ 168, 1, 261, "/usr/libexec/nsurlsessiond" },
++	{ 172, 1, 0, "/usr/libexec/autofsd" },
++	{ 176, 1, 242, "/usr/libexec/dasd" },
++	{ 180, 1, 0, "/System/Library/CoreServices/logind" },
++	{ 184, 1, 0, "/System/Library/PrivateFrameworks/GenerationalStorage.framework/Versions/A/Support/revisiond" },
++	{ 188, 1, 0, "/usr/sbin/KernelEventAgent" },
++	{ 192, 1, 0, "/usr/sbin/bluetoothd" },
++	{ 196, 1, 0, "/usr/libexec/sandboxd" },
++	{ 200, 1, 0, "/usr/libexec/corebrightnessd" },
++	{ 204, 1, 0, "/usr/libexec/AirPlayXPCHelper" },
++	{ 208, 1, 0, "/usr/sbin/notifyd" },
++	{ 212, 1, 241, "/usr/sbin/distnoted" },
++	{ 216, 1, 0, "/usr/libexec/syspolicyd" },
++	{ 220, 1, 0, "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow" },
++	{ 224, 1, 0, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd" },
++	{ 228, 1, 0, "/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/authd.xpc/Contents/MacOS/authd" },
++	{ 232, 1, 0, "/usr/sbin/cfprefsd" },
++	{ 236, 1, 0, "/usr/libexec/coreduetd" },
++	{ 240, 1, 0, "/usr/libexec/nehelper" },
++	{ 244, 1, 0, "/usr/libexec/runningboardd" },
++	{ 248, 1, 205, "/usr/libexec/locationd" },
++	{ 252, 1, 0, "/usr/libexec/sysmond" },
++	{ 256, 1, 0, "/usr/libexec/trustdFileHelper" },
++	{ 260, 1, 263, "/System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsd" },
++	{ 264, 1, 0, "/usr/libexec/airportd" },
++	{ 268, 1, 0, "/usr/libexec/apfsd" },
++	{ 272, 1, 0, "/usr/libexec/PerfPowerServices" },
++	{ 276, 1, 266, "/usr/libexec/containermanagerd" },
++	{ 280, 1, 0, "/usr/libexec/lsd" },
++	{ 284, 1, 0, "/System/Library/CoreServices/sharedfilelistd" },
++	{ 288, 1, 0, "/usr/libexec/mobileassetd" },
++	{ 292, 1, 0, "/usr/libexec/secinitd" },
++	{ 296, 1, 0, "/usr/libexec/trustd" },
++	{ 300, 1, 65, "/usr/sbin/mDNSResponder" },
++	{ 304, 1, 0, "/usr/sbin/mDNSResponderHelper" },
++	{ 308, 1, 0, "/usr/libexec/symptomsd" },
++	{ 312, 1, 0, "/usr/libexec/keybagd" },
++	{ 316, 1, 0, "/usr/libexec/wifip2pd" },
++	{ 320, 1, 0, "/usr/libexec/usbd" },
++	{ 324, 1, 0, "/usr/libexec/endpointsecurityd" },
++	{ 328, 1, 0, "/usr/libexec/biometrickitd" },
++	{ 332, 1, 0, "/usr/libexec/coreservicesd" },
++	{ 336, 1, 0, "/System/Library/PrivateFrameworks/CoreSymbolication.framework/coresymbolicationd" },
++	{ 340, 1, 0, "/usr/libexec/PowerUIAgent" },
++	{ 344, 1, 0, "/usr/libexec/wifianalyticsd" },
++	{ 348, 1, 0, "/System/Library/PrivateFrameworks/WirelessDiagnostics.framework/Support/awdd" },
++	{ 352, 1, 0, "/usr/libexec/nesessionmanager" },
++	{ 356, 1, 0, "/usr/libexec/tzd" },
++	{ 360, 1, 202, "/usr/sbin/coreaudiod" },
++	{ 364, 1, 0, "/System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/com.apple.cmio.registerassistantservice" },
++	{ 368, 1, 0, "/System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar" },
++	{ 372, 1, 88, "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer" },
++	{ 376, 1, 0, "/usr/libexec/hidd" },
++	{ 380, 1, 0, "/System/Library/CoreServices/backupd.bundle/Contents/Resources/backupd-helper" },
++	{ 384, 1, 0, "/usr/sbin/systemsoundserverd" },
++	{ 388, 1, 0, "/usr/libexec/wifivelocityd" },
++	{ 392, 1, 0, "/usr/libexec/bootinstalld" },
++	{ 396, 1, 0, "/usr/libexec/securityd_service" },
++	{ 400, 1, 0, "/usr/libexec/searchpartyd" },
++	{ 404, 1, 0, "/usr/libexec/colorsync.displayservices" },
++	{ 408, 1, 0, "/usr/libexec/colorsyncd" },
++	{ 412, 1, 0, "/System/Library/CoreServices/SubmitDiagInfo" },
++	{ 416, 1, 0, "/usr/libexec/findmydeviced" },
++	{ 420, 1, 0, "/usr/libexec/dprivacyd" },
++	{ 424, 1, 0, "/usr/libexec/periodic-wrapper" },
++	{ 428, 1, 0, "/usr/libexec/aned" },
++	{ 432, 1, 0, "/usr/libexec/mmaintenanced" },
++	{ 436, 1, 0, "/usr/libexec/storagekitd" },
++	{ 440, 1, 0, "/System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService" },
++	{ 444, 1, 0, "/Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect" },
++	{ 448, 1, 0, "/usr/libexec/gamecontrollerd" },
++	{ 452, 1, 0, "/usr/libexec/audioclocksyncd" },
++	{ 456, 1, 0, "/usr/libexec/rtcreportingd" },
++	{ 460, 1, 0, "/usr/libexec/softwareupdated" },
++	{ 464, 1, 0, "/System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd" },
++	{ 468, 1, 0, "/usr/libexec/mdmclient" },
++	{ 472, 1, 0, "/usr/libexec/triald_system" },
++	{ 476, 1, 0, "/usr/libexec/ioupsd" },
++	{ 480, 1, 0, "/usr/sbin/filecoordinationd" },
++	{ 484, 1, 0, "/usr/libexec/netbiosd" },
++	{ 488, 1, 0, "/usr/libexec/sysextd" },
++	{ 492, 1, 0, "/usr/libexec/nfcd" },
++	{ 496, 1, 0, "/usr/sbin/spindump" },
++	{ 500, 1, 89, "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores" },
++	{ 504, 1, 0, "/System/Library/PrivateFrameworks/PackageKit.framework/Resources/system_installd" },
++	{ 508, 1, 0, "/System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd" },
++	{ 512, 1, 0, "/usr/libexec/applessdstatistics" },
++	{ 516, 1, 0, "/usr/libexec/ptpcamerad" },
++	{ 520, 1, 0, "/usr/libexec/smbd" },
++	{ 524, 1, 0, "/usr/libexec/misagent" },
++	{ 568, 1, -1, "/usr/sbin/cfprefsd" },
++	{ 572, 1, -1, "/usr/sbin/distnoted" },
++	{ 576, 1, -1, "/usr/libexec/UserEventAgent" },
++	{ 580, 1, -1, "/usr/libexec/lsd" },
++	{ 584, 1, -1, "/usr/libexec/trustd" },
++	{ 588, 1, -1, "/usr/libexec/secd" },
++	{ 592, 1, -1, "/usr/libexec/pboard" },
++	{ 596, 1, -1, "/usr/libexec/rapportd" },
++	{ 600, 1, -1, "/usr/libexec/nsurlsessiond" },
++	{ 604, 1, -1, "/usr/libexec/secinitd" },
++	{ 608, 1, -1, "/usr/libexec/containermanagerd" },
++	{ 612, 1, -1, "/usr/libexec/pkd" },
++	{ 616, 1, -1, "/usr/libexec/tccd" },
++	{ 620, 1, -1, "/usr/libexec/knowledge-agent" },
++	{ 624, 1, -1, "/usr/libexec/sharingd" },
++	{ 628, 1, -1, "/usr/libexec/dmd" },
++	{ 632, 1, -1, "/usr/libexec/routined" },
++	{ 636, 1, -1, "/usr/libexec/fmfd" },
++	{ 640, 1, -1, "/usr/libexec/keyboardservicesd" },
++	{ 644, 1, -1, "/usr/libexec/replayd" },
++	{ 648, 1, -1, "/usr/libexec/avconferenced" },
++	{ 652, 1, -1, "/usr/libexec/siriknowledged" },
++	{ 656, 1, -1, "/usr/libexec/proactived" },
++	{ 660, 1, -1, "/usr/libexec/triald" },
++	{ 664, 1, -1, "/usr/libexec/cloudd" },
++	{ 668, 1, -1, "/usr/libexec/bird" },
++	{ 672, 1, -1, "/usr/libexec/networkserviceproxy" },
++	{ 676, 1, -1, "/usr/libexec/remindd" },
++	{ 680, 1, -1, "/usr/libexec/findmylocateagent" },
++	{ 684, 1, -1, "/usr/libexec/ContinuityCaptureAgent" },
++	{ 688, 1, -1, "/usr/libexec/WiFiAgent" },
++	{ 692, 1, -1, "/usr/libexec/BackgroundTaskManagementAgent" },
++	{ 696, 1, -1, "/usr/libexec/universalaccessd" },
++	{ 700, 1, -1, "/usr/libexec/dataaccessd" },
++	{ 704, 1, -1, "/usr/libexec/swcd" },
++	{ 708, 1, -1, "/usr/libexec/biomesyncd" },
++	{ 712, 1, -1, "/usr/libexec/adprivacyd" },
++	{ 716, 1, -1, "/usr/libexec/studentd" },
++	{ 720, 1, -1, "/usr/libexec/duetexpertd" },
++	{ 724, 1, -1, "/usr/libexec/intelligenceplatformd" },
++	{ 728, 1, -1, "/usr/libexec/siriactionsd" },
++	{ 732, 1, -1, "/usr/libexec/mediaanalysisd" },
++	{ 736, 1, -1, "/usr/libexec/corespeechd" },
++	{ 740, 1, -1, "/usr/libexec/donotdisturbd" },
++	{ 744, 1, -1, "/usr/libexec/assistantd" },
++	{ 748, 1, -1, "/usr/libexec/ScreenTimeAgent" },
++	{ 752, 1, -1, "/usr/libexec/spotlightknowledged" },
++	{ 756, 1, -1, "/usr/libexec/financed" },
++	{ 760, 1, -1, "/usr/libexec/SidecarRelay" },
++	{ 764, 1, -1, "/usr/libexec/extensionkitservice" },
++	{ 768, 1, -1, "/usr/libexec/localizationswitcherd" },
++	{ 772, 1, -1, "/usr/libexec/feedbackd" },
++	{ 776, 1, -1, "/usr/libexec/nearbyd" },
++	{ 780, 1, -1, "/usr/libexec/seserviced" },
++	{ 784, 1, -1, "/usr/libexec/itunescloudd" },
++	{ 788, 1, -1, "/usr/libexec/amsaccountsd" },
++	{ 792, 1, -1, "/usr/libexec/amsengagementd" },
++	{ 796, 1, -1, "/usr/libexec/promotedcontentd" },
++	{ 800, 1, -1, "/usr/libexec/contextstored" },
++	{ 804, 1, -1, "/usr/libexec/coreduetd" },
++	{ 808, 1, -1, "/usr/libexec/accessoryupdaterd" },
++	{ 812, 1, -1, "/usr/libexec/webprivacyd" },
++	{ 816, 1, -1, "/usr/libexec/transparencyd" },
++	{ 820, 1, -1, "/usr/sbin/usernoted" },
++	{ 824, 1, -1, "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock" },
++	{ 828, 1, -1, "/System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer" },
++	{ 832, 1, -1, "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder" },
++	{ 836, 1, -1, "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter" },
++	{ 840, 1, -1, "/System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter" },
++	{ 844, 1, -1, "/System/Library/CoreServices/Spotlight.app/Contents/MacOS/Spotlight" },
++	{ 848, 1, -1, "/System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager" },
++	{ 852, 1, -1, "/System/Library/CoreServices/TextInputMenuAgent.app/Contents/MacOS/TextInputMenuAgent" },
++	{ 856, 1, -1, "/System/Library/CoreServices/AirPlayUIAgent.app/Contents/MacOS/AirPlayUIAgent" },
++	{ 860, 1, -1, "/System/Library/CoreServices/WiFiAgent.app/Contents/MacOS/WiFiAgent" },
++	{ 864, 1, -1, "/System/Library/CoreServices/CoreLocationAgent.app/Contents/MacOS/CoreLocationAgent" },
++	{ 868, 1, -1, "/System/Library/CoreServices/talagent" },
++	{ 872, 1, -1, "/System/Library/CoreServices/pbs" },
++	{ 876, 1, -1, "/System/Library/CoreServices/sharedfilelistd" },
++	{ 880, 1, -1, "/System/Library/CoreServices/iconservicesagent" },
++	{ 884, 1, -1, "/System/Library/CoreServices/diagnostics_agent" },
++	{ 888, 1, -1, "/System/Library/CoreServices/ReportCrash" },
++	{ 892, 1, -1, "/System/Library/CoreServices/Siri.app/Contents/MacOS/Siri" },
++	{ 896, 1, -1, "/System/Library/CoreServices/backgroundtaskmanagementd" },
++	{ 900, 1, -1, "/System/Library/CoreServices/cloudpaird" },
++	{ 904, 1, -1, "/System/Library/CoreServices/mapspushd" },
++	{ 908, 1, -1, "/System/Library/CoreServices/OSDUIHelper.app/Contents/MacOS/OSDUIHelper" },
++	{ 912, 1, -1, "/System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem" },
++	{ 916, 1, -1, "/System/Library/CoreServices/Dock.app/Contents/XPCServices/com.apple.dock.extra.xpc/Contents/MacOS/com.apple.dock.extra" },
++	{ 920, 1, -1, "/System/Library/CoreServices/Dock.app/Contents/XPCServices/DockHelper.xpc/Contents/MacOS/DockHelper" },
++	{ 924, 1, -1, "/System/Library/CoreServices/CoreServicesUIAgent.app/Contents/MacOS/CoreServicesUIAgent" },
++	{ 928, 1, -1, "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared" },
++	{ 932, 1, -1, "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport" },
++	{ 936, 1, -1, "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd" },
++	{ 940, 1, -1, "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/ATS.framework/Support/fontd" },
++	{ 944, 1, -1, "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/ATS.framework/Versions/A/Support/fontworker" },
++	{ 948, 1, -1, "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice" },
++	{ 952, 1, -1, "/System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar" },
++	{ 956, 1, -1, "/System/Library/Frameworks/AudioToolbox.framework/XPCServices/com.apple.audio.SandboxHelper.xpc/Contents/MacOS/com.apple.audio.SandboxHelper" },
++	{ 960, 1, -1, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter" },
++	{ 964, 1, -1, "/System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd" },
++	{ 968, 1, -1, "/System/Library/Frameworks/AddressBook.framework/Executables/ContactsAccountsService" },
++	{ 972, 1, -1, "/System/Library/Frameworks/AddressBook.framework/Helpers/AddressBookSourceSync.app/Contents/MacOS/AddressBookSourceSync" },
++	{ 976, 1, -1, "/System/Library/Frameworks/Contacts.framework/Support/contactsd" },
++	{ 980, 1, -1, "/System/Library/Frameworks/InputMethodKit.framework/Resources/imklaunchagent" },
++	{ 984, 1, -1, "/System/Library/Frameworks/LocalAuthentication.framework/Support/coreautha.bundle/Contents/MacOS/coreautha" },
++	{ 988, 1, -1, "/System/Library/Frameworks/CryptoTokenKit.framework/ctkd" },
++	{ 992, 1, -1, "/System/Library/Frameworks/CryptoTokenKit.framework/ctkahp.bundle/Contents/MacOS/ctkahp" },
++	{ 996, 1, -1, "/System/Library/Frameworks/Security.framework/Versions/A/Resources/CloudKeychainProxy.bundle/Contents/MacOS/CloudKeychainProxy" },
++	{ 1000, 1, -1, "/System/Library/Frameworks/MediaAccessibility.framework/Versions/A/XPCServices/com.apple.accessibility.mediaaccessibilityd.xpc/Contents/MacOS/com.apple.accessibility.mediaaccessibilityd" },
++	{ 1004, 1, -1, "/System/Library/Frameworks/QuickLookUI.framework/Versions/A/XPCServices/QuickLookUIService.xpc/Contents/MacOS/QuickLookUIService" },
++	{ 1008, 1, -1, "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService" },
++	{ 1012, 1, -1, "/System/Library/Frameworks/Metal.framework/Versions/A/XPCServices/MTLCompilerService.xpc/Contents/MacOS/MTLCompilerService" },
++	{ 1016, 1, -1, "/System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/ThemeWidgetControlViewService.xpc/Contents/MacOS/ThemeWidgetControlViewService" },
++	{ 1020, 1, -1, "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister" },
++	{ 1024, 1, -1, "/System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc/Contents/MacOS/extensionkitservice" },
++	{ 1028, 1, -1, "/System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd" },
++	{ 1032, 1, -1, "/System/Library/PrivateFrameworks/IDS.framework/identityservicesd.app/Contents/MacOS/identityservicesd" },
++	{ 1036, 1, -1, "/System/Library/PrivateFrameworks/IMCore.framework/imagent.app/Contents/MacOS/imagent" },
++	{ 1040, 1, -1, "/System/Library/PrivateFrameworks/CalendarDaemon.framework/Support/calaccessd" },
++	{ 1044, 1, -1, "/System/Library/PrivateFrameworks/CalendarNotification.framework/Versions/A/XPCServices/CalNCService.xpc/Contents/MacOS/CalNCService" },
++	{ 1048, 1, -1, "/System/Library/PrivateFrameworks/PhotoLibraryServices.framework/Versions/A/Support/photolibraryd" },
++	{ 1052, 1, -1, "/System/Library/PrivateFrameworks/PhotoAnalysis.framework/Versions/A/Support/photoanalysisd" },
++	{ 1056, 1, -1, "/System/Library/PrivateFrameworks/AssistantServices.framework/Versions/A/Support/assistant_service" },
++	{ 1060, 1, -1, "/System/Library/PrivateFrameworks/AuthKit.framework/Versions/A/Support/akd" },
++	{ 1064, 1, -1, "/System/Library/PrivateFrameworks/AppleMediaServices.framework/Resources/amsaccountsd" },
++	{ 1068, 1, -1, "/System/Library/PrivateFrameworks/AppStoreDaemon.framework/Support/appstoreagent" },
++	{ 1072, 1, -1, "/System/Library/PrivateFrameworks/CommerceKit.framework/Versions/A/Resources/commerce" },
++	{ 1076, 1, -1, "/System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd" },
++	{ 1080, 1, -1, "/System/Library/PrivateFrameworks/CoreParsec.framework/parsecd" },
++	{ 1084, 1, -1, "/System/Library/PrivateFrameworks/CoreFollowUp.framework/Versions/A/Support/followupd" },
++	{ 1088, 1, -1, "/System/Library/PrivateFrameworks/CoreCDP.framework/Versions/A/Resources/cdpd" },
++	{ 1092, 1, -1, "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd" },
++	{ 1096, 1, -1, "/System/Library/PrivateFrameworks/ContextKit.framework/Versions/A/XPCServices/ContextService.xpc/Contents/MacOS/ContextService" },
++	{ 1100, 1, -1, "/System/Library/PrivateFrameworks/DataAccess.framework/Support/dataaccessd" },
++	{ 1104, 1, -1, "/System/Library/PrivateFrameworks/DoNotDisturbServer.framework/Support/donotdisturbd" },
++	{ 1108, 1, -1, "/System/Library/PrivateFrameworks/FamilyCircle.framework/Versions/A/Resources/familycircled" },
++	{ 1112, 1, -1, "/System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod" },
++	{ 1116, 1, -1, "/System/Library/PrivateFrameworks/HomeKitDaemon.framework/Support/homed" },
++	{ 1120, 1, -1, "/System/Library/PrivateFrameworks/IMDPersistence.framework/XPCServices/IMDPersistenceAgent.xpc/Contents/MacOS/IMDPersistenceAgent" },
++	{ 1124, 1, -1, "/System/Library/PrivateFrameworks/iCloudNotification.framework/iCloudNotificationAgent" },
++	{ 1128, 1, -1, "/System/Library/PrivateFrameworks/iTunesCloud.framework/Support/itunescloudd" },
++	{ 1132, 1, -1, "/System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoteagent" },
++	{ 1136, 1, -1, "/System/Library/PrivateFrameworks/MessagesBlastDoorSupport.framework/Versions/A/XPCServices/MessagesBlastDoorService.xpc/Contents/MacOS/MessagesBlastDoorService" },
++	{ 1140, 1, -1, "/System/Library/PrivateFrameworks/PassKitCore.framework/passd" },
++	{ 1144, 1, -1, "/System/Library/PrivateFrameworks/SafariSafeBrowsing.framework/com.apple.Safari.SafeBrowsing.Service" },
++	{ 1148, 1, -1, "/System/Library/PrivateFrameworks/ScreenTimeCore.framework/Versions/A/ScreenTimeAgent" },
++	{ 1152, 1, -1, "/System/Library/PrivateFrameworks/SoftwareUpdate.framework/Resources/softwareupdate_notify_agent" },
++	{ 1156, 1, -1, "/System/Library/PrivateFrameworks/StatusKit.framework/Versions/A/Support/StatusKitAgent" },
++	{ 1160, 1, -1, "/System/Library/PrivateFrameworks/SyncedDefaults.framework/Support/syncdefaultsd" },
++	{ 1164, 1, -1, "/System/Library/PrivateFrameworks/TelephonyUtilities.framework/callservicesd" },
++	{ 1168, 1, -1, "/System/Library/PrivateFrameworks/TextInput.framework/Resources/keyboardservicesd" },
++	{ 1172, 1, -1, "/System/Library/PrivateFrameworks/UsageTracking.framework/Versions/A/UsageTrackingAgent" },
++	{ 1176, 1, -1, "/System/Library/PrivateFrameworks/UserActivity.framework/Agents/useractivityd" },
++	{ 1180, 1, -1, "/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary" },
++	{ 1184, 1, -1, "/System/Library/PrivateFrameworks/WeatherDaemon.framework/weatherd" },
++	{ 1188, 1, -1, "/System/Library/PrivateFrameworks/AMPLibrary.framework/Versions/A/Support/AMPLibraryAgent" },
++	{ 1192, 1, -1, "/System/Library/PrivateFrameworks/AMPDevices.framework/Versions/A/Support/AMPDeviceDiscoveryAgent" },
++	{ 1196, 1, -1, "/System/Library/PrivateFrameworks/CoreWLANKit.framework/Versions/A/XPCServices/WiFiProxy.xpc/Contents/MacOS/WiFiProxy" },
++	{ 1200, 1, -1, "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/AquaAppearanceHelper.app/Contents/MacOS/AquaAppearanceHelper" },
++	{ 1204, 1, -1, "/System/Library/Input Methods/PressAndHold.app/Contents/PlugIns/PAH_Extension.appex/Contents/MacOS/PAH_Extension" },
++	{ 1208, 1, -1, "/System/Library/ExtensionKit/Extensions/WallpaperIntentsExtension.appex/Contents/MacOS/WallpaperIntentsExtension" },
++	{ 1212, 1, -1, "/System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension" },
++	{ 1216, 1, -1, "/System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent" },
++};
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/kill.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/kill.c
+index e1a2b35..809d5f9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/kill.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/kill.c
+@@ -8,6 +8,7 @@
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/other/mach/lkm.h>
+ #include <darling/emulation/linux_premigration/signal/sigexc.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
+ 
+ extern int getpid(void);
+ 
+@@ -31,6 +32,14 @@ long sys_kill(int pid, int signum, int posix)
+ 	if (signum && !linux_signum)
+ 		return -EINVAL;
+ 
++	/* darling-lol: a Mac's system processes exist but are not ours to signal. */
++	if (pid >= 0)
++	{
++		const struct darling_mac_process* mac = darling_mac_process_find(pid);
++		if (mac != (void*) 0 && pid != 0)
++			return (signum == 0 && mac->uid < 0) ? 0 : -EPERM;
++	}
++
+ 	ret = LINUX_SYSCALL(__NR_kill, pid, linux_signum);
+ 	if (ret < 0)
+ 		ret = errno_linux_to_bsd(ret);

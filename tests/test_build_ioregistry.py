@@ -60,6 +60,12 @@ DUMP = '''+-o Root  <class IORegistryEntry, id 0x100000100, retain 20>
     | |       "BSD Name" = "en6"
     | |     }
     | |
+    | +-o NCM2  <class AppleUSBNCMData, id 0x100000222, registered, matched, active, busy 0 (0 ms), retain 9>
+    | | +-o en9  <class IOEthernetInterface, id 0x100000223, registered, matched, active, busy 0 (0 ms), retain 9>
+    | |     {
+    | |       "BSD Name" = "en9"
+    | |     }
+    | |
     | +-o ANS2  <class IONVMeBlockStorageDevice, id 0x100000230, registered, matched, active, busy 0 (0 ms), retain 9>
     |     {
     |       "Device Characteristics" = {"Serial Number"="REALDISKSERIAL","Medium Type"="Solid State"}
@@ -118,8 +124,13 @@ class BuildTests(unittest.TestCase):
         derived = {'IOMACAddress': ['net.en0.ether', 'mac~en2']}
         self.assertEqual(self.entries['en2']['I'], derived)
         self.assertEqual(self.entries['TBIP']['I'], derived)
-        self.assertNotIn('en6', self.entries)   # the guest has no en6
-        self.assertIn('NCM', self.entries)
+        self.assertNotIn('en9', self.entries)   # the guest has no en9
+        self.assertIn('NCM2', self.entries)
+        # The link to the T2 chip carries the address every such Mac has.
+        t2 = bytes.fromhex('acde48001122')
+        self.assertEqual(self.entries['en6']['P']['IOMACAddress'], t2)
+        self.assertEqual(self.entries['NCM']['P']['IOMACAddress'], t2)
+        self.assertNotIn('I', self.entries['en6'])
 
     def test_emitted_data_round_trips(self):
         output = Path(self.tmp.name) / 'data.inc'

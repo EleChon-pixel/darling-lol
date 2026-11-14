@@ -2,6 +2,7 @@
 from pathlib import Path
 import importlib.util
 import os
+import plistlib
 import tempfile
 import unittest
 
@@ -25,7 +26,7 @@ class MacAccountDetailTests(unittest.TestCase):
     def test_interface_list_has_every_macbook_pro_interface(self):
         net = new_side('patches/xnu.patch',
                        'darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c')
-        for name in ('gif0', 'stf0', 'anpi0', 'anpi1', 'en1', 'en2', 'en3', 'en4', 'ap1', 'awdl0',
+        for name in ('gif0', 'stf0', 'anpi0', 'anpi1', 'en1', 'en2', 'en3', 'en4', 'en5', 'en6', 'ap1', 'awdl0',
                      'llw0', 'bridge0', 'utun0'):
             self.assertIn('{ "%s", ' % name, net)
         self.assertIn('emit_phantoms(old, oldlen, &old_ptr, &total_len, &shown', net)
@@ -64,6 +65,32 @@ class MacAccountDetailTests(unittest.TestCase):
                 (Path(folder) / relative).write_bytes(data)
             self.assertEqual(platform.mac_account_files(Path(folder)), {})
 
+    def test_prefix_gets_the_places_every_mac_has(self):
+        platform = tool('configure-darling-platform')
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder)
+            (prefix / 'Applications/Safari.app/Contents').mkdir(parents=True)
+            (prefix / 'Applications/Safari.app/Contents/Info.plist').write_bytes(b'kept')
+            self.assertTrue(platform.save_mac_skeleton(prefix))
+            for relative in ('System/Volumes/Data', 'System/Volumes/Preboot', 'System/Volumes/VM',
+                             'System/Library/Kernels', 'System/Cryptexes/OS',
+                             'private/var/db/dslocal/nodes/Default',
+                             'System/Library/Extensions/AppleSMC.kext',
+                             'System/Library/CoreServices/Finder.app', 'System/Library/CoreServices/Dock.app',
+                             'System/Applications/Calculator.app',
+                             'Library/Apple/System/Library/CoreServices/XProtect.bundle'):
+                self.assertTrue((prefix / relative).exists(), relative)
+            self.assertEqual((prefix / 'Applications/Safari.app/Contents/Info.plist').read_bytes(), b'kept')
+            finder = plistlib.loads((prefix / 'System/Library/CoreServices/Finder.app/Contents/Info.plist').read_bytes())
+            self.assertEqual(finder['CFBundleIdentifier'], 'com.apple.finder')
+            # Markers only: nothing to launch, nothing that claims URLs or documents.
+            for path in prefix.rglob('*'):
+                self.assertNotIn('MacOS', path.parts)
+            for relative, data in platform.MAC_SKELETON_FILES.items():
+                if data:
+                    self.assertFalse({'CFBundleURLTypes', 'CFBundleDocumentTypes'} & set(plistlib.loads(data)))
+            self.assertFalse(platform.save_mac_skeleton(prefix))
+
     def test_new_prefixes_get_zsh(self):
         darling = new_side('patches/darling.patch', 'src/startup/darling.c')
         self.assertIn(':/Users/%s:/bin/zsh\\n"', darling)
@@ -79,6 +106,10 @@ class MacAccountDetailTests(unittest.TestCase):
             self.assertEqual((len(parts[3]), len(parts[4]), parts[5], parts[6]), (2, 28, 'T', ''))
             self.assertTrue(parts[4].endswith('0000gn'))
             self.assertTrue(os.path.isdir(folder + environ['TMPDIR']))
+            self.assertEqual(environ['DARLING_GUEST_TMPDIR'], environ['TMPDIR'])
+            darling = new_side('patches/darling.patch', 'src/startup/darling.c')
+            self.assertIn('getenv("DARLING_GUEST_TMPDIR")', darling)
+            self.assertIn('"DARLING_GUEST_TMPDIR",\n\t};', darling)
             again = {'DPREFIX': folder, 'USER': 'someone'}
             guest.filter_host_environment(again)
             self.assertEqual(again['TMPDIR'], environ['TMPDIR'])
