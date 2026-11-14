@@ -57,7 +57,7 @@
    "revision": "67a8ad2ed0b06775bf53839446e2df7d49ab1c96",
    "repository": "https://github.com/darlinghq/darling-opendirectory.git",
    "patch": "patches/OpenDirectory.patch",
-   "modified_files": 1,
+   "modified_files": 2,
    "new_files": []
   },
   {
@@ -126,7 +126,8 @@
     "src/dc_codesign.h",
     "internal-include/darlingserver/trustcache.hpp",
     "src/trustcache.cpp",
-    "include/darlingserver/dc_entitlements.h"
+    "include/darlingserver/dc_entitlements.h",
+    "duct-tape/src/kext_list.inc"
    ]
   },
   {
@@ -318,7 +319,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 100,
+   "modified_files": 105,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/runtime_identity.h",

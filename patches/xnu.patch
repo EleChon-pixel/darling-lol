@@ -3186,10 +3186,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..13c450a
+index 0000000..8472491
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,844 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3724,27 +3724,124 @@ index 0000000..13c450a
 +	}
 +	strcpy(type, "apfs");
 +	strcpy(from, "/dev/disk1s1");
-+	if (mounted_on[0] != '/' || istarts(mounted_on, "/volumes/systemroot") || path_under(mounted_on, "/proc", 5))
-+		strcpy(on, "/");
++	/* statfs names the host's mount point, which is not a guest path: whatever is not
++	 * one of the volumes below (set by the caller) is the system volume. */
++	(void) mounted_on;
++	strcpy(on, "/");
 +	(void) on_size;
 +}
 +
-+static void mac_statfs64(struct bsd_statfs64* s)
++#define MAC_APFS_TYPE 0x1a /* f_type of APFS */
++/* f_flags as mount(8) shows them: the sealed system volume is "local, read-only,
++ * journaled", the data volume "local, journaled, nobrowse, protect", the others
++ * "local, journaled, nobrowse". */
++#define MAC_ROOT_FLAGS 0x4080D001u /* RDONLY, LOCAL, ROOTFS, DOVOLFS, JOURNALED, SNAPSHOT */
++#define MAC_DATA_FLAGS 0x00909080u /* CPROTECT, LOCAL, DOVOLFS, DONTBROWSE, JOURNALED */
++#define MAC_OTHER_FLAGS 0x00901000u /* LOCAL, DONTBROWSE, JOURNALED */
++
++static unsigned int mac_volume_flags(const struct mac_volume* volume)
 +{
-+	char on[sizeof(s->f_mntonname)];
-+	strcpy(on, s->f_mntonname);
-+	memset(s->f_fstypename, 0, sizeof(s->f_fstypename));
-+	memset(s->f_mntfromname, 0, sizeof(s->f_mntfromname));
-+	mac_fs_names(on, s->f_fstypename, s->f_mntfromname, s->f_mntonname, sizeof(s->f_mntonname));
++	if (volume == NULL)
++		return MAC_ROOT_FLAGS;
++	return volume == &mac_volumes[MAC_VOLUME_COUNT - 1] ? MAC_DATA_FLAGS : MAC_OTHER_FLAGS;
 +}
 +
-+static void mac_statfs(struct bsd_statfs* s)
++static void mac_statfs64(struct bsd_statfs64* s, const struct mac_volume* volume)
 +{
 +	char on[sizeof(s->f_mntonname)];
 +	strcpy(on, s->f_mntonname);
 +	memset(s->f_fstypename, 0, sizeof(s->f_fstypename));
 +	memset(s->f_mntfromname, 0, sizeof(s->f_mntfromname));
 +	mac_fs_names(on, s->f_fstypename, s->f_mntfromname, s->f_mntonname, sizeof(s->f_mntonname));
++	if (strcmp(s->f_fstypename, "apfs") != 0)
++		return;
++	s->f_type = MAC_APFS_TYPE;
++	s->f_fssubtype = 0;
++	s->f_iosize = 1048576; /* APFS's optimal transfer size */
++	s->f_owner = 0;
++	s->f_flags = mac_volume_flags(volume);
++	if (volume != NULL)
++	{
++		strcpy(s->f_mntfromname, volume->from);
++		strcpy(s->f_mntonname, volume->on);
++	}
++}
++
++static void mac_statfs(struct bsd_statfs* s, const struct mac_volume* volume)
++{
++	char on[sizeof(s->f_mntonname)];
++	strcpy(on, s->f_mntonname);
++	memset(s->f_fstypename, 0, sizeof(s->f_fstypename));
++	memset(s->f_mntfromname, 0, sizeof(s->f_mntfromname));
++	mac_fs_names(on, s->f_fstypename, s->f_mntfromname, s->f_mntonname, sizeof(s->f_mntonname));
++	if (strcmp(s->f_fstypename, "apfs") != 0)
++		return;
++	s->f_type = MAC_APFS_TYPE;
++	s->f_owner = 0;
++	s->f_flags = mac_volume_flags(volume);
++	if (volume != NULL)
++	{
++		strcpy(s->f_mntfromname, volume->from);
++		strcpy(s->f_mntonname, volume->on);
++	}
++}
++
++/* The volume an open file lies on, by the path it was opened by. */
++static const struct mac_volume* mac_volume_of_fd(int fd)
++{
++	struct vchroot_fdpath_args args;
++	char path[4096];
++
++	args.fd = fd;
++	args.path = path;
++	args.maxlen = sizeof(path);
++	if (vchroot_fdpath(&args) < 0 || path[0] != '/')
++		return NULL;
++	return mac_volume_of(path);
++}
++
++/*
++ * What getattrlist reports about the volume a guest path lies on: its statfs record,
++ * its name, and a UUID that is the machine's (kern.uuid) varied by volume.
++ */
++long darling_attr_volume(const char* path, struct bsd_statfs64* s, const char** name, unsigned char* uuid)
++{
++	static const char* const names[] = { "VM", "Preboot", "Update", "Data" };
++	char data[DARLING_RUNTIME_IDENTITY_MAX], value[64];
++	long rv = sys_statfs64(path, s);
++	long index = MAC_VOLUME_COUNT;
++	int digits = 0;
++
++	if (rv != 0)
++		return rv;
++	*name = "Macintosh HD";
++	if (darling_guest_view_active())
++	{
++		const struct mac_volume* volume = mac_volume_of(path);
++
++		mac_statfs64(s, volume);
++		if (volume != NULL && strcmp(s->f_fstypename, "apfs") == 0)
++		{
++			index = volume - mac_volumes;
++			*name = names[index];
++		}
++	}
++	memset(uuid, 0, 16);
++	if (__darling_identity_load(data, sizeof(data)) && darling_identity_lookup(data, "kern.uuid", value, sizeof(value)))
++	{
++		for (const char* p = value; *p && digits < 32; p++)
++		{
++			int digit = (*p >= '0' && *p <= '9') ? *p - '0' : (lower(*p) >= 'a' && lower(*p) <= 'f') ? lower(*p) - 'a' + 10 : -1;
++			if (digit < 0)
++				continue;
++			uuid[digits / 2] |= (unsigned char)(digit << ((digits & 1) ? 0 : 4));
++			digits++;
++		}
++	}
++	uuid[15] ^= (unsigned char)(index + 1);
++	uuid[6] = (uuid[6] & 0x0F) | 0x40; /* a random (version 4) UUID, as volume UUIDs are */
++	uuid[8] = (uuid[8] & 0x3F) | 0x80;
++	return 0;
 +}
 +
 +long guarded_statfs(const char* path, struct bsd_statfs* buf)
@@ -3753,13 +3850,7 @@ index 0000000..13c450a
 +	long rv = sys_statfs(path, buf);
 +	if (rv == 0 && darling_guest_view_active())
 +	{
-+		const struct mac_volume* volume = path != NULL ? mac_volume_of(path) : NULL;
-+		mac_statfs(buf);
-+		if (volume != NULL && strcmp(buf->f_fstypename, "apfs") == 0)
-+		{
-+			strcpy(buf->f_mntfromname, volume->from);
-+			strcpy(buf->f_mntonname, volume->on);
-+		}
++		mac_statfs(buf, path != NULL ? mac_volume_of(path) : NULL);
 +	}
 +	return rv;
 +}
@@ -3770,13 +3861,7 @@ index 0000000..13c450a
 +	long rv = sys_statfs64(path, buf);
 +	if (rv == 0 && darling_guest_view_active())
 +	{
-+		const struct mac_volume* volume = path != NULL ? mac_volume_of(path) : NULL;
-+		mac_statfs64(buf);
-+		if (volume != NULL && strcmp(buf->f_fstypename, "apfs") == 0)
-+		{
-+			strcpy(buf->f_mntfromname, volume->from);
-+			strcpy(buf->f_mntonname, volume->on);
-+		}
++		mac_statfs64(buf, path != NULL ? mac_volume_of(path) : NULL);
 +	}
 +	return rv;
 +}
@@ -3785,7 +3870,7 @@ index 0000000..13c450a
 +{
 +	long rv = sys_fstatfs(fd, buf);
 +	if (rv == 0 && darling_guest_view_active())
-+		mac_statfs(buf);
++		mac_statfs(buf, mac_volume_of_fd(fd));
 +	return rv;
 +}
 +
@@ -3793,7 +3878,7 @@ index 0000000..13c450a
 +{
 +	long rv = sys_fstatfs64(fd, buf);
 +	if (rv == 0 && darling_guest_view_active())
-+		mac_statfs64(buf);
++		mac_statfs64(buf, mac_volume_of_fd(fd));
 +	return rv;
 +}
 +
@@ -3816,7 +3901,7 @@ index 0000000..13c450a
 +			continue;
 +		if (kept != i)
 +			memcpy(&buf[kept], &buf[i], sizeof(buf[i]));
-+		mac_statfs64(&buf[kept]);
++		mac_statfs64(&buf[kept], NULL);
 +		if (strcmp(buf[kept].f_mntonname, "/") == 0)
 +			root = kept;
 +		kept++;
@@ -3831,6 +3916,7 @@ index 0000000..13c450a
 +		memset(buf[kept].f_mntonname, 0, sizeof(buf[kept].f_mntonname));
 +		strcpy(buf[kept].f_mntfromname, mac_volumes[i].from);
 +		strcpy(buf[kept].f_mntonname, mac_volumes[i].on);
++		buf[kept].f_flags = mac_volume_flags(&mac_volumes[i]);
 +		kept++;
 +	}
 +	return kept;
@@ -12781,10 +12867,10 @@ index 0a7e492..96855e6 100644
  	if (bpos < ret) {
  		__simple_printf("bpos < ret; %d < %d", bpos, ret);
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
-index 8377a32..597371b 100644
+index 8377a32..84a17f1 100644
 --- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
 +++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/getattrlist_generic.c
-@@ -1,30 +1,90 @@
+@@ -1,44 +1,254 @@
  #include <stddef.h>
 +#include <stdint.h>
 +#include <stdbool.h>
@@ -12810,7 +12896,8 @@ index 8377a32..597371b 100644
 + * getattrlist(2) for one file system object, packed the way XNU's vfs_attr_pack does:
 + * a length word, the returned-attributes set when asked for, then the fixed-size
 + * attributes in bit order, then the variable-length data they refer to. Everything
-+ * stat(2) knows is answered; volume attributes and forks are not.
++ * stat(2) knows is answered, and a volume request (ATTR_VOL_INFO) describes the volume
++ * the object lies on from its statfs(2) record; forks are not.
 + */
 +
  #define ATTR_BIT_MAP_COUNT 5
@@ -12869,13 +12956,50 @@ index 8377a32..597371b 100644
 +#define ATTR_FILE_DATAALLOCSIZE     0x00000400
 +#define ATTR_FILE_RSRCLENGTH        0x00001000
 +#define ATTR_FILE_RSRCALLOCSIZE     0x00002000
++
++#define ATTR_VOL_FSTYPE             0x00000001
++#define ATTR_VOL_SIZE               0x00000004
++#define ATTR_VOL_SPACEFREE          0x00000008
++#define ATTR_VOL_SPACEAVAIL         0x00000010
++#define ATTR_VOL_MINALLOCATION      0x00000020
++#define ATTR_VOL_ALLOCATIONCLUMP    0x00000040
++#define ATTR_VOL_IOBLOCKSIZE        0x00000080
++#define ATTR_VOL_OBJCOUNT           0x00000100
++#define ATTR_VOL_FILECOUNT          0x00000200
++#define ATTR_VOL_DIRCOUNT           0x00000400
++#define ATTR_VOL_MAXOBJCOUNT        0x00000800
++#define ATTR_VOL_MOUNTPOINT         0x00001000
++#define ATTR_VOL_NAME               0x00002000
++#define ATTR_VOL_MOUNTFLAGS         0x00004000
++#define ATTR_VOL_MOUNTEDDEVICE      0x00008000
++#define ATTR_VOL_ENCODINGSUSED      0x00010000
++#define ATTR_VOL_CAPABILITIES       0x00020000
++#define ATTR_VOL_UUID               0x00040000
++#define ATTR_VOL_ATTRIBUTES         0x40000000
++#define ATTR_VOL_INFO               0x80000000
  
 -#define ATTR_CMN_FNDRINFO 0x4000
 -#define ATTR_FILE_RSRCLENGTH 0x1000
 -#define ATTR_CMN_OBJTAG 0x00000010
 -#define ATTR_DIR_ENTRYCOUNT 0x00000002
++/* What APFS says it can do (vol_capabilities_attr_t), for a case-insensitive volume:
++ * format: persistent object IDs, symbolic and hard links, sparse files, case
++ * preserving, fast statfs, 2 TB files, hidden files, path from ID, 64-bit object IDs,
++ * document IDs, write generation counts, shared space, volume groups;
++ * interfaces: searchfs, attrlist, volume rename, advisory and flock locks, extended
++ * security, user access, named streams, extended attributes, clones, snapshots,
++ * rename swap and exclusive rename. */
++#define APFS_CAPABILITIES_FORMAT       0x019A6E47u
++#define APFS_CAPABILITIES_FORMAT_VALID 0x03FFFFFFu
++#define APFS_CAPABILITIES_INTERFACES       0x000F6F83u
++#define APFS_CAPABILITIES_INTERFACES_VALID 0x007F7FFFu
++
 +#define COMMON_SUPPORTED (~(uint32_t) ATTR_CMN_ERROR)
-+#define VOLUME_SUPPORTED 0u
++#define VOLUME_SUPPORTED (ATTR_VOL_FSTYPE | ATTR_VOL_SIZE | ATTR_VOL_SPACEFREE | ATTR_VOL_SPACEAVAIL | \
++	ATTR_VOL_MINALLOCATION | ATTR_VOL_ALLOCATIONCLUMP | ATTR_VOL_IOBLOCKSIZE | ATTR_VOL_OBJCOUNT | ATTR_VOL_FILECOUNT | \
++	ATTR_VOL_DIRCOUNT | ATTR_VOL_MAXOBJCOUNT | ATTR_VOL_MOUNTPOINT | ATTR_VOL_NAME | ATTR_VOL_MOUNTFLAGS | \
++	ATTR_VOL_MOUNTEDDEVICE | ATTR_VOL_ENCODINGSUSED | ATTR_VOL_CAPABILITIES | ATTR_VOL_UUID | ATTR_VOL_ATTRIBUTES | \
++	ATTR_VOL_INFO)
 +#define DIR_SUPPORTED (ATTR_DIR_LINKCOUNT | ATTR_DIR_ENTRYCOUNT | ATTR_DIR_MOUNTSTATUS | ATTR_DIR_ALLOCSIZE | \
 +	ATTR_DIR_IOBLOCKSIZE | ATTR_DIR_DATALENGTH)
 +#define FILE_SUPPORTED (ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE | ATTR_FILE_IOBLOCKSIZE | \
@@ -12884,23 +13008,38 @@ index 8377a32..597371b 100644
  
  #define XATTR_FINDER_INFO "com.apple.FinderInfo"
  #define XATTR_RESOURCE_FORK "com.apple.ResourceFork"
-@@ -33,12 +93,103 @@
+ 
+ #define FSOPT_NOFOLLOW 1
  #define FSOPT_REPORT_FULLSIZE 4
++#define FSOPT_PACK_INVAL_ATTRS 8
++
++/* File attributes no file system here keeps; they only take up their space when the
++ * caller wants every requested attribute packed (FSOPT_PACK_INVAL_ATTRS). */
++#define ATTR_FILE_CLUMPSIZE         0x00000010
++#define ATTR_FILE_FILETYPE          0x00000040
++#define ATTR_FILE_FORKCOUNT         0x00000080
++#define ATTR_FILE_FORKLIST          0x00000100
++#define ATTR_FILE_DATAEXTENTS       0x00000800
++#define ATTR_FILE_RSRCEXTENTS       0x00004000
++#define FILE_PLACEHOLDERS (ATTR_FILE_CLUMPSIZE | ATTR_FILE_FILETYPE | ATTR_FILE_FORKCOUNT | ATTR_FILE_FORKLIST | \
++	ATTR_FILE_DATAEXTENTS | ATTR_FILE_RSRCEXTENTS)
  
  #define VT_HFS 16
 +#define TEXT_ENCODING_UNICODE 0x7E
- 
--#define min(a,b) (((a) < (b)) ? (a) : (b))
++
 +#ifndef LINUX_O_PATH
 +#	define LINUX_O_PATH 010000000
 +#endif
-+
+ 
+-#define min(a,b) (((a) < (b)) ? (a) : (b))
 +#define LINUX_S_IFMT 0170000
  
  extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
  extern void *memset(void *s, int c, __SIZE_TYPE__ n);
 -extern char *strcpy(char *dest, const char *src);
 +extern __SIZE_TYPE__ strlen(const char* s);
++
++long darling_attr_volume(const char* path, struct bsd_statfs64* s, const char** name, unsigned char* uuid);
 +
 +struct attr_timespec
 +{
@@ -12966,23 +13105,30 @@ index 8377a32..597371b 100644
 +	}
 +}
 +
-+static __SIZE_TYPE__ attr_fixed_size(uint32_t common, uint32_t dir, uint32_t file)
++static __SIZE_TYPE__ attr_fixed_size(uint32_t common, uint32_t volume, uint32_t dir, uint32_t file)
 +{
++	static const unsigned char volume_sizes[32] = {
++		4, 4, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 8,
++		8, 32, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 40, 0,
++	};
 +	static const unsigned char common_sizes[32] = {
 +		8, 4, 8, 4, 4, 8, 8, 8, 4, 16, 16, 16, 16, 16, 32, 4,
 +		4, 4, 4, 4, 4, 4, 8, 16, 16, 8, 8, 8, 16, 4, 4, 20,
 +	};
 +	static const unsigned char dir_sizes[6] = { 4, 4, 4, 8, 4, 8 };
-+	static const unsigned char file_sizes[14] = { 4, 8, 8, 4, 0, 4, 0, 0, 0, 8, 8, 0, 8, 8 };
++	static const unsigned char file_sizes[15] = { 4, 8, 8, 4, 4, 4, 4, 4, 8, 8, 8, 64, 8, 8, 64 };
 +	__SIZE_TYPE__ size = 0;
 +
 +	for (int bit = 0; bit < 32; bit++)
 +		if (common & (1u << bit))
 +			size += common_sizes[bit];
++	for (int bit = 0; bit < 32; bit++)
++		if (volume & (1u << bit))
++			size += volume_sizes[bit];
 +	for (int bit = 0; bit < 6; bit++)
 +		if (dir & (1u << bit))
 +			size += dir_sizes[bit];
-+	for (int bit = 0; bit < 14; bit++)
++	for (int bit = 0; bit < 15; bit++)
 +		if (file & (1u << bit))
 +			size += file_sizes[bit];
 +	return size;
@@ -12990,7 +13136,7 @@ index 8377a32..597371b 100644
  
  long
  FUNC_NAME(int fd,
-@@ -49,133 +200,299 @@ const char* path,
+@@ -49,133 +259,423 @@ const char* path,
  
  struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
  {
@@ -13003,14 +13149,20 @@ index 8377a32..597371b 100644
 +	struct vchroot_fdpath_args guest;
 +	char guest_path[4096];
 +	char fd_path[40];
-+	/* the fixed part is at most 388 bytes; the name and the path follow it */
-+	char out[4 + 400 + 4096 + 4096 + 16];
++	/* the fixed part is at most 600 bytes; names and paths follow it */
++	char out[4 + 600 + 4096 + 4096 + 3 * 1100];
 +	struct attr_cursor cursor;
-+	uint32_t common, dir, file, total;
++	uint32_t common, volume, dir, file, total;
++	struct bsd_statfs64 fs;
++	const char* volume_name = "";
++	unsigned char volume_uuid[16];
 +	const char* name;
 +	uint32_t name_length, path_length;
 +	uint64_t parent;
 +	bool is_dir, is_root;
++	/* with FSOPT_PACK_INVAL_ATTRS every requested attribute has its place, valid or not */
++	bool pack_invalid = (options & FSOPT_PACK_INVAL_ATTRS) != 0;
++	uint32_t layout_common, layout_dir, layout_file;
  
  	if (!alist)
  		return -EFAULT;
@@ -13035,27 +13187,40 @@ index 8377a32..597371b 100644
  		return -EINVAL;
  
 -	if ((alist->commonattr & COMMON_SUPPORTED) != alist->commonattr)
--		return -EINVAL;
--	if ((alist->volattr & VOLUME_SUPPORTED) != alist->volattr)
 +	common = alist->commonattr;
 +	dir = alist->dirattr;
 +	file = alist->fileattr;
-+	if (alist->volattr & ~VOLUME_SUPPORTED)
++	volume = alist->volattr;
++	/* a volume request says so, and asks for nothing about files or directories */
++	if (volume != 0 && (!(volume & ATTR_VOL_INFO) || dir != 0 || file != 0))
  		return -EINVAL;
--	if ((alist->dirattr & DIR_SUPPORTED) != alist->dirattr)
+-	if ((alist->volattr & VOLUME_SUPPORTED) != alist->volattr)
 +	if (alist->forkattr & ~FORK_SUPPORTED)
  		return -EINVAL;
+-	if ((alist->dirattr & DIR_SUPPORTED) != alist->dirattr)
+-		return -EINVAL;
 -	if ((alist->fileattr & FILE_SUPPORTED) != alist->fileattr)
 -		return -EINVAL;
 -	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
-+	if (common & ATTR_CMN_RETURNED_ATTRS)
++	layout_common = common;
++	layout_dir = dir;
++	layout_file = file;
++	if (pack_invalid)
++	{
++		if (file & ~(FILE_SUPPORTED | FILE_PLACEHOLDERS) || (dir & ~DIR_SUPPORTED) || (volume & ~VOLUME_SUPPORTED))
++			return -EINVAL;
++		common &= COMMON_SUPPORTED;
++		file &= FILE_SUPPORTED;
++	}
++	else if (common & ATTR_CMN_RETURNED_ATTRS)
 +	{
 +		/* The caller learns from the returned set what was left out. */
 +		common &= COMMON_SUPPORTED;
++		volume &= VOLUME_SUPPORTED;
 +		dir &= DIR_SUPPORTED;
 +		file &= FILE_SUPPORTED;
 +	}
-+	else if ((common & ~COMMON_SUPPORTED) || (dir & ~DIR_SUPPORTED) || (file & ~FILE_SUPPORTED))
++	else if ((common & ~COMMON_SUPPORTED) || (volume & ~VOLUME_SUPPORTED) || (dir & ~DIR_SUPPORTED) || (file & ~FILE_SUPPORTED))
  		return -EINVAL;
  
 -	if (alist->commonattr & ATTR_CMN_FNDRINFO)
@@ -13103,28 +13268,25 @@ index 8377a32..597371b 100644
 -		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, NULL, 0);
 +	object = fd;
  #endif
--		if (rv < 0)
--			*((uint32_t*) next) = 0;
--		else
--			*((uint32_t*) next) = rv;
--		next += 4;
 +
 +	rv = LINUX_SYSCALL(__NR_newfstatat, object, "", &st, LINUX_AT_EMPTY_PATH);
 +	if (rv < 0)
 +	{
 +		rv = errno_linux_to_bsd(rv);
 +		goto out;
- 	}
++	}
 +	is_dir = (st.st_mode & LINUX_S_IFMT) == 0040000;
 +	if (is_dir)
 +		file = 0;
 +	else
 +		dir = 0;
- 
--	if (alist->commonattr & ATTR_CMN_OBJTAG) {
--		// pretend we're always on HFS
--		*((uint32_t*)next) = VT_HFS;
--		next += 4;
++	if (!pack_invalid)
++	{
++		layout_common = common;
++		layout_dir = dir;
++		layout_file = file;
++	}
++
 +	/* The object's own path as the guest sees it: its name is the last component. */
 +	guest.fd = object;
 +	guest.path = guest_path;
@@ -13133,7 +13295,7 @@ index 8377a32..597371b 100644
 +	{
 +		guest_path[0] = '/';
 +		guest_path[1] = '\0';
- 	}
++	}
 +	path_length = strlen(guest_path);
 +	while (path_length > 1 && guest_path[path_length - 1] == '/')
 +		guest_path[--path_length] = '\0';
@@ -13145,70 +13307,56 @@ index 8377a32..597371b 100644
 +	if (is_root)
 +		name = "Macintosh HD"; /* the root directory is named after its volume */
 +	name_length = strlen(name);
- 
--	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT) {
--		char buf[1024]; // maybe this should be smaller?
--		int tmp_fd;
++
 +	__simple_sprintf(fd_path, "/proc/self/fd/%d", object);
- 
--		*((uint32_t*)next) = 0;
++
++	if (volume != 0)
++	{
++		rv = darling_attr_volume(guest_path, &fs, &volume_name, volume_uuid);
+ 		if (rv < 0)
+-			*((uint32_t*) next) = 0;
++			goto out;
++	}
++
 +	parent = 1; /* the parent of a volume's root */
 +	if (!is_root && (common & (ATTR_CMN_PAROBJID | ATTR_CMN_PARENTID)))
 +	{
 +		struct linux_stat parent_stat;
 +		long got = -1;
- 
--#if HAS_PATH
--		tmp_fd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, LINUX_O_RDONLY | LINUX_O_DIRECTORY, 0);
--		if (tmp_fd < 0) {
--			rv = -EIO; // translate all errors into EIO (to avoid confusing our caller)
--			goto attr_dir_entrycount_out_no_fd;
--		}
--#else
--		// dupe it to avoid advancing the internal `getdents` position if our caller is using that
--		tmp_fd = sys_dup(fd);
--		if (tmp_fd < 0) {
--			rv = -EIO; // see above
--			goto attr_dir_entrycount_out_no_fd;
--		}
--#endif
++
 +		if (is_dir)
 +			got = LINUX_SYSCALL(__NR_newfstatat, object, "..", &parent_stat, 0);
-+		else
+ 		else
+-			*((uint32_t*) next) = rv;
+-		next += 4;
 +		{
 +			/* the directory part of the host path this descriptor was opened by */
 +			char host[4096];
 +			long length = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, fd_path, host, sizeof(host) - 1);
- 
--		while (1) {
--			// there's basically no other way to do this (at least none that either i or the internet know of)
--			rv = LINUX_SYSCALL(__NR_getdents64, tmp_fd, buf, sizeof(buf));
--			if (rv < 0) {
--				rv = -EIO; // same as before: avoid confusing our caller with unexepected errnos
--				goto attr_dir_entrycount_out;
--			} else if (rv == 0) {
--				break;
++
 +			while (length > 1 && host[length - 1] != '/')
 +				length--;
 +			if (length >= 1)
 +			{
 +				host[length] = '\0';
 +				got = LINUX_SYSCALL(__NR_newfstatat, LINUX_AT_FDCWD, host, &parent_stat, 0);
- 			}
++			}
 +		}
 +		parent = got == 0 ? parent_stat.st_ino : 0;
-+	}
-+
+ 	}
+ 
+-	if (alist->commonattr & ATTR_CMN_OBJTAG) {
+-		// pretend we're always on HFS
+-		*((uint32_t*)next) = VT_HFS;
+-		next += 4;
 +	memset(out, 0, sizeof(out));
 +	cursor.fixed = out + 4;
-+	cursor.var = cursor.fixed + attr_fixed_size(common, dir, file);
- 
--			for (char* iter = buf; iter < buf + rv; iter += ((struct linux_dirent64*)iter)->d_reclen) {
--				++(*((uint32_t*)next));
++	cursor.var = cursor.fixed + attr_fixed_size(layout_common, volume, layout_dir, layout_file);
++
 +	if (common & ATTR_CMN_RETURNED_ATTRS)
 +	{
 +		attr_put32(&cursor, common);
-+		attr_put32(&cursor, 0);
++		attr_put32(&cursor, volume & ~ATTR_VOL_INFO);
 +		attr_put32(&cursor, dir);
 +		attr_put32(&cursor, file);
 +		attr_put32(&cursor, 0);
@@ -13230,7 +13378,7 @@ index 8377a32..597371b 100644
 +	{
 +		attr_put32(&cursor, (uint32_t) st.st_ino);
 +		attr_put32(&cursor, 0);
-+	}
+ 	}
 +	if (common & ATTR_CMN_OBJPERMANENTID)
 +	{
 +		attr_put32(&cursor, (uint32_t) st.st_ino);
@@ -13275,7 +13423,10 @@ index 8377a32..597371b 100644
 +	if (common & ATTR_CMN_USERACCESS)
 +	{
 +		uint32_t access = 0;
-+
+ 
+-	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT) {
+-		char buf[1024]; // maybe this should be smaller?
+-		int tmp_fd;
 +		for (int mode = 1; mode <= 4; mode <<= 1) /* X_OK, W_OK, R_OK */
 +			if (LINUX_SYSCALL(__NR_faccessat, LINUX_AT_FDCWD, fd_path, mode) == 0)
 +				access |= mode;
@@ -13295,9 +13446,101 @@ index 8377a32..597371b 100644
 +		attr_put_variable(&cursor, guest_path, path_length + 1);
 +	if (common & ATTR_CMN_ADDEDTIME)
 +		attr_put_time(&cursor, st.st_ctime, st.st_ctime_nsec);
++	if (layout_common & ATTR_CMN_ERROR)
++		attr_put32(&cursor, 0);
 +	if (common & ATTR_CMN_DATA_PROTECT_FLAGS)
 +		attr_put32(&cursor, 0);
-+
+ 
+-		*((uint32_t*)next) = 0;
++	if (volume != 0)
++	{
++		uint64_t block = fs.f_bsize;
++		uint64_t objects = fs.f_files > fs.f_ffree ? (uint64_t)(fs.f_files - fs.f_ffree) : 0;
+ 
+-#if HAS_PATH
+-		tmp_fd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, LINUX_O_RDONLY | LINUX_O_DIRECTORY, 0);
+-		if (tmp_fd < 0) {
+-			rv = -EIO; // translate all errors into EIO (to avoid confusing our caller)
+-			goto attr_dir_entrycount_out_no_fd;
++		if (objects > 0xFFFFFFFFu)
++			objects = 0xFFFFFFFFu;
++		if (volume & ATTR_VOL_FSTYPE)
++			attr_put32(&cursor, fs.f_type);
++		if (volume & ATTR_VOL_SIZE)
++			attr_put64(&cursor, (uint64_t) fs.f_blocks * block);
++		if (volume & ATTR_VOL_SPACEFREE)
++			attr_put64(&cursor, (uint64_t) fs.f_bfree * block);
++		if (volume & ATTR_VOL_SPACEAVAIL)
++			attr_put64(&cursor, (uint64_t) fs.f_bavail * block);
++		if (volume & ATTR_VOL_MINALLOCATION)
++			attr_put64(&cursor, block);
++		if (volume & ATTR_VOL_ALLOCATIONCLUMP)
++			attr_put64(&cursor, block);
++		if (volume & ATTR_VOL_IOBLOCKSIZE)
++			attr_put32(&cursor, fs.f_iosize > 0 ? (uint32_t) fs.f_iosize : (uint32_t) block);
++		if (volume & ATTR_VOL_OBJCOUNT)
++			attr_put32(&cursor, (uint32_t) objects);
++		if (volume & ATTR_VOL_FILECOUNT)
++			attr_put32(&cursor, (uint32_t)(objects - objects / 8));
++		if (volume & ATTR_VOL_DIRCOUNT)
++			attr_put32(&cursor, (uint32_t)(objects / 8));
++		if (volume & ATTR_VOL_MAXOBJCOUNT)
++			attr_put32(&cursor, 0xFFFFFFFFu);
++		if (volume & ATTR_VOL_MOUNTPOINT)
++			attr_put_variable(&cursor, fs.f_mntonname, strlen(fs.f_mntonname) + 1);
++		if (volume & ATTR_VOL_NAME)
++			attr_put_variable(&cursor, volume_name, strlen(volume_name) + 1);
++		if (volume & ATTR_VOL_MOUNTFLAGS)
++			attr_put32(&cursor, fs.f_flags);
++		if (volume & ATTR_VOL_MOUNTEDDEVICE)
++			attr_put_variable(&cursor, fs.f_mntfromname, strlen(fs.f_mntfromname) + 1);
++		if (volume & ATTR_VOL_ENCODINGSUSED)
++			attr_put64(&cursor, 1); /* only the default encoding */
++		if (volume & ATTR_VOL_CAPABILITIES)
++		{
++			attr_put32(&cursor, APFS_CAPABILITIES_FORMAT);
++			attr_put32(&cursor, APFS_CAPABILITIES_INTERFACES);
++			attr_put32(&cursor, 0);
++			attr_put32(&cursor, 0);
++			attr_put32(&cursor, APFS_CAPABILITIES_FORMAT_VALID);
++			attr_put32(&cursor, APFS_CAPABILITIES_INTERFACES_VALID);
++			attr_put32(&cursor, 0);
++			attr_put32(&cursor, 0);
+ 		}
+-#else
+-		// dupe it to avoid advancing the internal `getdents` position if our caller is using that
+-		tmp_fd = sys_dup(fd);
+-		if (tmp_fd < 0) {
+-			rv = -EIO; // see above
+-			goto attr_dir_entrycount_out_no_fd;
++		if (volume & ATTR_VOL_UUID)
++			attr_put(&cursor, volume_uuid, sizeof(volume_uuid));
++		if (volume & ATTR_VOL_ATTRIBUTES)
++		{
++			/* the attributes that can be asked for, and those the file system keeps itself */
++			for (int set = 0; set < 2; set++)
++			{
++				attr_put32(&cursor, COMMON_SUPPORTED);
++				attr_put32(&cursor, VOLUME_SUPPORTED);
++				attr_put32(&cursor, DIR_SUPPORTED);
++				attr_put32(&cursor, FILE_SUPPORTED);
++				attr_put32(&cursor, 0);
++			}
+ 		}
+-#endif
++	}
+ 
+-		while (1) {
+-			// there's basically no other way to do this (at least none that either i or the internet know of)
+-			rv = LINUX_SYSCALL(__NR_getdents64, tmp_fd, buf, sizeof(buf));
+-			if (rv < 0) {
+-				rv = -EIO; // same as before: avoid confusing our caller with unexepected errnos
+-				goto attr_dir_entrycount_out;
+-			} else if (rv == 0) {
+-				break;
+-			}
++	if (!is_dir)
++		cursor.fixed += attr_fixed_size(0, 0, layout_dir, 0); /* left zero */
 +	if (dir & ATTR_DIR_LINKCOUNT)
 +		attr_put32(&cursor, (uint32_t) st.st_nlink);
 +	if (dir & ATTR_DIR_ENTRYCOUNT)
@@ -13309,7 +13552,9 @@ index 8377a32..597371b 100644
 +		if (listing >= 0)
 +		{
 +			long got;
-+
+ 
+-			for (char* iter = buf; iter < buf + rv; iter += ((struct linux_dirent64*)iter)->d_reclen) {
+-				++(*((uint32_t*)next));
 +			// there's basically no other way to do this (at least none that either i or the internet know of)
 +			while ((got = LINUX_SYSCALL(__NR_getdents64, listing, buf, sizeof(buf))) > 0)
 +			{
@@ -13323,13 +13568,8 @@ index 8377a32..597371b 100644
  			}
 +			close_internal(listing);
  		}
--
--attr_dir_entrycount_out:
--		close_internal(tmp_fd);
--attr_dir_entrycount_out_no_fd:
--		next += 4;
 +		attr_put32(&cursor, count);
- 	}
++	}
 +	if (dir & ATTR_DIR_MOUNTSTATUS)
 +		attr_put32(&cursor, is_root ? 1 /* DIR_MNTSTATUS_MNTPOINT */ : 0);
 +	if (dir & ATTR_DIR_ALLOCSIZE)
@@ -13339,8 +13579,19 @@ index 8377a32..597371b 100644
 +	if (dir & ATTR_DIR_DATALENGTH)
 +		attr_put64(&cursor, (uint64_t) st.st_size);
  
--	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
--		bufferSize = spaceNeeded;
+-attr_dir_entrycount_out:
+-		close_internal(tmp_fd);
+-attr_dir_entrycount_out_no_fd:
+-		next += 4;
++	if (is_dir)
++	{
++		char* end = cursor.fixed + attr_fixed_size(0, 0, 0, layout_file); /* left zero */
++
++		if (layout_file & ATTR_FILE_FORKLIST)
++			cursor.var = end > cursor.var ? end : cursor.var;
++		cursor.fixed = end;
++		layout_file = 0;
++	}
 +	if (file & ATTR_FILE_LINKCOUNT)
 +		attr_put32(&cursor, (uint32_t) st.st_nlink);
 +	if (file & ATTR_FILE_TOTALSIZE)
@@ -13349,12 +13600,22 @@ index 8377a32..597371b 100644
 +		attr_put64(&cursor, (uint64_t) st.st_blocks * 512);
 +	if (file & ATTR_FILE_IOBLOCKSIZE)
 +		attr_put32(&cursor, (uint32_t) st.st_blksize);
++	if (layout_file & ATTR_FILE_CLUMPSIZE)
++		attr_put32(&cursor, 0);
 +	if (file & ATTR_FILE_DEVTYPE)
 +		attr_put32(&cursor, (uint32_t) st.st_rdev);
++	if (layout_file & ATTR_FILE_FILETYPE)
++		attr_put32(&cursor, 0);
++	if (layout_file & ATTR_FILE_FORKCOUNT)
++		attr_put32(&cursor, 0);
++	if (layout_file & ATTR_FILE_FORKLIST)
++		attr_put_variable(&cursor, NULL, 0);
 +	if (file & ATTR_FILE_DATALENGTH)
 +		attr_put64(&cursor, (uint64_t) st.st_size);
 +	if (file & ATTR_FILE_DATAALLOCSIZE)
 +		attr_put64(&cursor, (uint64_t) st.st_blocks * 512);
++	if (layout_file & ATTR_FILE_DATAEXTENTS)
++		cursor.fixed += 64;
 +	if (file & (ATTR_FILE_RSRCLENGTH | ATTR_FILE_RSRCALLOCSIZE))
 +	{
 +		long length = LINUX_SYSCALL(__NR_getxattr, fd_path, XATTR_RESOURCE_FORK, NULL, 0);
@@ -13365,7 +13626,12 @@ index 8377a32..597371b 100644
 +			attr_put64(&cursor, (uint64_t) length);
 +		if (file & ATTR_FILE_RSRCALLOCSIZE)
 +			attr_put64(&cursor, ((uint64_t) length + 4095) & ~4095ULL);
-+	}
+ 	}
+ 
+-	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
+-		bufferSize = spaceNeeded;
++	if (layout_file & ATTR_FILE_RSRCEXTENTS)
++		cursor.fixed += 64;
  
 -	*((uint32_t*) ourBuffer) = bufferSize;
 +	total = (uint32_t)(cursor.var - out);
@@ -13384,4 +13650,228 @@ index 8377a32..597371b 100644
 +	close_internal(object);
 +#endif
 +	return rv;
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/xattr/getattrlistbulk.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/xattr/getattrlistbulk.h
+index b04390e..2157578 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/xattr/getattrlistbulk.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/xattr/getattrlistbulk.h
+@@ -1,6 +1,8 @@
+ #ifndef LINUX_GETATTRLISTBULK_H
+ #define LINUX_GETATTRLISTBULK_H
+ 
+-long sys_getattrlistbulk();
++#include <darling/emulation/conversion/xattr/getattrlist.h>
++
++long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options);
+ 
+ #endif // LINUX_GETATTRLISTBULK_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
+index cbfba07..369c7fc 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
+@@ -13,9 +13,56 @@
+ #define IOCTL_STEP(x) { int state, retval; state = (x); \
+ 	if (state == IOCTL_HANDLED) return retval; }
+ 
++extern int strcmp(const char* a, const char* b);
++
++/* CTLIOCGINFO: _IOWR('N', 3, struct ctl_info) */
++#define BSD_CTLIOCGINFO 0xC0644E03u
++
++struct bsd_ctl_info
++{
++	unsigned int ctl_id;
++	char ctl_name[96];
++};
++
++/* The kernel controls a macOS 14 kernel registers at boot, in a plausible order; IDs
++ * are handed out by registration order and differ between machines. */
++static const char* const kernel_controls[] = {
++	"com.apple.flow-divert",
++	"com.apple.net.netagent",
++	"com.apple.content-filter",
++	"com.apple.net.utun_control",
++	"com.apple.net.ipsec_control",
++	"com.apple.netsrc",
++	"com.apple.network.statistics",
++	"com.apple.network.tcp_ccdebug",
++	"com.apple.network.advisory",
++	"com.apple.uart.BLTH",
++	"com.apple.uart.sk.BLTH",
++	"com.apple.fileutil.kext.stateful.ctl",
++	"com.apple.fileutil.kext.stateless.ctl",
++};
++
+ // Emulated ioctl implementation
+ long sys_ioctl(int fd, int cmd, void* arg)
+ {
++	if ((unsigned int) cmd == BSD_CTLIOCGINFO)
++	{
++		struct bsd_ctl_info* info = (struct bsd_ctl_info*) arg;
++
++		if (info == NULL)
++			return -EFAULT;
++		info->ctl_name[sizeof(info->ctl_name) - 1] = '\0';
++		for (unsigned int i = 0; i < sizeof(kernel_controls) / sizeof(kernel_controls[0]); i++)
++		{
++			if (strcmp(info->ctl_name, kernel_controls[i]) == 0)
++			{
++				info->ctl_id = i + 1;
++				return 0;
++			}
++		}
++		return -ENOENT;
++	}
++
+ 	IOCTL_STEP(handle_filio(fd, cmd, arg, &retval));
+ 	IOCTL_STEP(handle_socket(fd, cmd, arg, &retval));
+ 	IOCTL_STEP(handle_termios(fd, cmd, arg, &retval));
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
+index 4e5aba4..8eacb44 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
+@@ -33,6 +33,10 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
+ 	if (socklen > 512)
+ 		return -EINVAL;
+ 
++	/* A kernel control address (AF_SYSTEM): see socket.c. */
++	if (name != NULL && socklen >= 2 && ((const unsigned char*) name)[1] == 32)
++		return -EPERM;
++
+ 	fixed = __builtin_alloca(sockaddr_fixup_size_from_bsd(name, socklen));
+ 	ret = socklen = sockaddr_fixup_from_bsd(fixed, name, socklen);
+ 	if (ret < 0)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/socket.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/socket.c
+index afd72b7..1bb47c4 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/socket.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/socket.c
+@@ -25,6 +25,20 @@ long sys_socket(int domain, int type, int protocol)
+ 			linux_domain = LINUX_PF_IPX; break;
+ 		case PF_INET6:
+ 			linux_domain = LINUX_PF_INET6; break;
++		case 32: /* PF_SYSTEM */
++			/*
++			 * Kernel control (SOCK_DGRAM, SYSPROTO_CONTROL) and kernel event (SOCK_RAW,
++			 * SYSPROTO_EVENT) sockets exist on every Mac. There is no kernel side here: the
++			 * descriptor is a socket nothing ever writes to, control names resolve
++			 * (CTLIOCGINFO in ioctl.c) and connecting to a control is refused as it is for
++			 * a process without the entitlement or privilege (connect.c).
++			 */
++			if (!((type == 2 && protocol == 2) || (type == 3 && protocol == 1)))
++				return -EPROTONOSUPPORT;
++			linux_domain = LINUX_PF_LOCAL;
++			type = 2; /* SOCK_DGRAM */
++			protocol = 0;
++			break;
+ 		default:
+ 			return -EINVAL;
+ 	}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getattrlistbulk.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getattrlistbulk.c
+index 6bd386b..3471ba3 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getattrlistbulk.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getattrlistbulk.c
+@@ -1,11 +1,102 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/xattr/getattrlistbulk.h>
+ 
++#include <stdint.h>
++#include <stdbool.h>
+ #include <sys/errno.h>
+ 
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/conversion/dirent/getdirentries.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/xattr/getattrlistat.h>
+ 
+-long sys_getattrlistbulk()
++#define ATTR_CMN_RETURNED_ATTRS 0x80000000
++#define FSOPT_NOFOLLOW 1
++#define FSOPT_REPORT_FULLSIZE 4
++#define FSOPT_PACK_INVAL_ATTRS 8
++
++#define LINUX_SEEK_SET 0
++#define LINUX_SEEK_CUR 1
++
++extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
++extern void *memset(void *s, int c, __SIZE_TYPE__ n);
++
++/*
++ * The attributes of the next entries of a directory, one getattrlist record after the
++ * other, each padded to eight bytes. Returns how many records fit; the directory's
++ * position stays at the first entry that did not.
++ */
++long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
+ {
+-	return -ENOTSUP;
++	char dents[1024];
++	char* out = (char*) attributeBuffer;
++	__SIZE_TYPE__ used = 0;
++	long count = 0, got;
++	long long position;
++	bool full = false;
++
++	if (!alist || !attributeBuffer)
++		return -EFAULT;
++	/* each record says which attributes it carries */
++	if (!(alist->commonattr & ATTR_CMN_RETURNED_ATTRS) || alist->volattr != 0)
++		return -EINVAL;
++
++	position = LINUX_SYSCALL(__NR_lseek, dirfd, 0, LINUX_SEEK_CUR);
++	if (position < 0)
++		return errno_linux_to_bsd((int) position);
++
++	while (!full && (got = LINUX_SYSCALL(__NR_getdents64, dirfd, dents, sizeof(dents))) > 0)
++	{
++		for (long at = 0; at < got;)
++		{
++			struct linux_dirent64* entry = (struct linux_dirent64*) (dents + at);
++			const char* name = entry->d_name;
++			uint32_t length = 0, written;
++			long rv;
++
++			at += entry->d_reclen;
++			if ((name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) ||
++				darling_guest_path_hidden(dirfd, name, false))
++			{
++				position = entry->d_off;
++				continue;
++			}
++			if (bufferSize - used < sizeof(uint32_t))
++			{
++				full = true;
++				break;
++			}
++			rv = sys_getattrlistat(dirfd, name, alist, out + used, bufferSize - used,
++				(options & FSOPT_PACK_INVAL_ATTRS) | FSOPT_NOFOLLOW | FSOPT_REPORT_FULLSIZE);
++			if (rv < 0)
++			{
++				/* gone since it was listed, or not ours to look at */
++				position = entry->d_off;
++				continue;
++			}
++			memcpy(&length, out + used, sizeof(length));
++			written = length;
++			length = (length + 7) & ~7u;
++			if (length > bufferSize - used)
++			{
++				full = true;
++				break;
++			}
++			memset(out + used + written, 0, length - written);
++			memcpy(out + used, &length, sizeof(length));
++			used += length;
++			count++;
++			position = entry->d_off;
++		}
++	}
++	if (got < 0 && count == 0)
++		return errno_linux_to_bsd((int) got);
++	if (full)
++	{
++		LINUX_SYSCALL(__NR_lseek, dirfd, position, LINUX_SEEK_SET);
++		if (count == 0)
++			return -ERANGE; /* not even one record fits */
++	}
++	return count;
  }

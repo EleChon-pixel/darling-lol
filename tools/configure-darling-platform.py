@@ -593,7 +593,51 @@ def mac_account_files(prefix):
         updated = '\n'.join(lines)
         if updated != text:
             result[relative] = updated.encode()
+    group = mac_group_file(prefix)
+    if group is not None:
+        result['private/etc/group'] = group
     return result
+
+
+# The system groups of a macOS install's /etc/group (name, gid, members). Darling writes
+# only wheel and the user's own group. The person who set up a Mac is an administrator,
+# so the account Darling generated is listed in staff and admin as well.
+MAC_SYSTEM_GROUPS = (
+    ('nobody', -2, ''), ('nogroup', -1, ''), ('wheel', 0, 'root'), ('daemon', 1, 'root'),
+    ('kmem', 2, 'root'), ('sys', 3, 'root'), ('tty', 4, 'root'), ('operator', 5, 'root'),
+    ('mail', 6, ''), ('bin', 7, ''), ('procview', 8, 'root'), ('procmod', 9, 'root'),
+    ('owner', 10, ''), ('everyone', 12, ''), ('group', 16, ''), ('staff', 20, 'root'),
+    ('certusers', 29, 'root'), ('localaccounts', 61, ''), ('admin', 80, 'root'),
+)
+MAC_USER_GROUPS = ('staff', 'admin')
+
+
+def mac_group_file(prefix):
+    """/etc/group with the Mac system groups Darling leaves out, or None if nothing is missing.
+
+    Groups already present (by name or gid) are kept as they are; missing ones are added.
+    """
+    path = checked_path(prefix, 'private/etc/group')
+    passwd = checked_path(prefix, 'private/etc/passwd')
+    if not path.exists() or not passwd.exists():
+        return None
+    users = [fields[0] for fields in (line.split(':') for line in passwd.read_text().splitlines())
+             if len(fields) >= 6 and fields[0] != 'root' and fields[5].startswith('/Users/')]
+    text = path.read_text()
+    rows = [line.split(':') for line in text.splitlines() if line and not line.startswith('#')]
+    names = {row[0] for row in rows}
+    gids = {row[2] for row in rows if len(row) > 2}
+    added = []
+    for name, gid, members in MAC_SYSTEM_GROUPS:
+        if name in names or str(gid) in gids:
+            continue
+        listed = [m for m in members.split(',') if m]
+        if name in MAC_USER_GROUPS:
+            listed += [u for u in users if u not in listed]
+        added.append('%s:*:%d:%s' % (name, gid, ','.join(listed)))
+    if not added:
+        return None
+    return (text.rstrip('\n') + '\n' + '\n'.join(added) + '\n').encode()
 
 
 def _bundle_plist(identifier, name, executable=None, package='APPL', version='14.7'):
@@ -630,6 +674,9 @@ MAC_SKELETON_FILES = {
         _bundle_plist('com.apple.calculator', 'Calculator', 'Calculator', version='10.16'),
     'Applications/Safari.app/Contents/Info.plist':
         _bundle_plist('com.apple.Safari', 'Safari', 'Safari', version='17.6'),
+    # CoreFoundation looks here for the words it shows next to the system version.
+    'System/Library/CoreServices/SystemVersion.bundle/en.lproj/SystemVersion.strings':
+        plistlib.dumps({'Build': 'Build', 'Version': 'Version'}, fmt=plistlib.FMT_BINARY, sort_keys=True),
     'System/Library/Kernels/kernel': b'',
     'Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist':
         _bundle_plist('com.apple.XProtect', 'XProtect', package='BNDL', version='5284'),
