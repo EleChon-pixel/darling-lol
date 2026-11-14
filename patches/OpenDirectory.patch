@@ -22,3 +22,178 @@ index 8ce6514..87ac046 100644
  	const char * const	argv0 = argv[0];
  	static const char * const	argString = "dhvxsctru:g:lL";
  	char		c;
+diff --git a/opendirectoryd/src/main.c b/opendirectoryd/src/main.c
+index dafbfe2..f7521fe 100644
+--- a/opendirectoryd/src/main.c
++++ b/opendirectoryd/src/main.c
+@@ -22,6 +22,9 @@
+ #include <stdlib.h>
+ #include <opendirectory/odipc.h>
+ #include <errno.h>
++#include <grp.h>
++#include <pwd.h>
++#include <arpa/inet.h>
+ #include <membership.h>
+ #include <membershipPriv.h>
+ #include <pwd.h>
+@@ -71,46 +74,134 @@ static const uuid_t _group_compat_prefix = {0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef,
+ 
+ static void build_uuid(const uuid_t source, id_t id, uuid_t dest) {
+ 	// adapted from libinfo
+-	uuid_copy(dest, _user_compat_prefix);
++	uuid_copy(dest, source);
+ 	*((id_t *) &dest[COMPAT_PREFIX_LEN]) = htonl(id);
+ };
+ 
++static void membership_reply_with_identifier(xpc_object_t message, const void* identifier, size_t size, int rec_type) {
++	xpc_object_t reply = xpc_dictionary_create_reply(message);
++
++	xpc_dictionary_set_data(reply, "identifier", identifier, size);
++	xpc_dictionary_set_int64(reply, "rectype", rec_type);
++	xpc_dictionary_set_int64(reply, OD_RPC_ERROR, 0);
++	xpc_connection_send_message(xpc_dictionary_get_remote_connection(message), reply);
++	xpc_release(reply);
++};
++
++// Users and groups are identified by number, by name, or by the UUID libinfo derives
++// from the number; any of the three is translated to any other. Records that do not
++// exist answer ENOENT, as a Mac's directory does.
+ static void rpc_mbr_identifier_translate(xpc_object_t message) {
+ 	int target_type = xpc_dictionary_get_int64(message, "requesting");
+ 	int id_type = xpc_dictionary_get_int64(message, "type");
+ 	size_t identifier_size = 0;
+ 	const void* identifier = xpc_dictionary_get_data(message, "identifier", &identifier_size);
++	char name[256];
++	int rec_type = 0;
++	id_t id = 0;
+ 
++	if (!identifier || identifier_size == 0) {
++		membership_reply_with_error(message, EINVAL);
++		return;
++	}
+ 
+-	if (id_type == ID_TYPE_USERNAME && target_type == ID_TYPE_UUID) {
+-		char tmp_string[256];
+-		strncpy(tmp_string, identifier, (identifier_size < sizeof(tmp_string)) ? identifier_size : sizeof(tmp_string));
+-		tmp_string[(identifier_size < sizeof(tmp_string)) ? identifier_size : sizeof(tmp_string) - 1] = '\0';
+-		struct passwd* pw = getpwnam(tmp_string);
++	// first: which record is meant
++	switch (id_type) {
++		case ID_TYPE_UID:
++		case ID_TYPE_GID:
++			if (identifier_size != sizeof(id_t)) {
++				membership_reply_with_error(message, EINVAL);
++				return;
++			}
++			memcpy(&id, identifier, sizeof(id));
++			rec_type = (id_type == ID_TYPE_UID) ? MBR_REC_TYPE_USER : MBR_REC_TYPE_GROUP;
++			break;
++		case ID_TYPE_USERNAME:
++		case ID_TYPE_GROUPNAME: {
++			size_t length = (identifier_size < sizeof(name) - 1) ? identifier_size : sizeof(name) - 1;
++
++			memcpy(name, identifier, length);
++			name[length] = '\0';
++			if (id_type == ID_TYPE_USERNAME) {
++				struct passwd* pw = getpwnam(name);
++				if (!pw) {
++					membership_reply_with_error(message, ENOENT);
++					return;
++				}
++				id = pw->pw_uid;
++				rec_type = MBR_REC_TYPE_USER;
++			} else {
++				struct group* gr = getgrnam(name);
++				if (!gr) {
++					membership_reply_with_error(message, ENOENT);
++					return;
++				}
++				id = gr->gr_gid;
++				rec_type = MBR_REC_TYPE_GROUP;
++			}
++			break;
++		}
++		case ID_TYPE_UUID:
++			if (identifier_size != sizeof(uuid_t)) {
++				membership_reply_with_error(message, EINVAL);
++				return;
++			}
++			if (memcmp(identifier, _user_compat_prefix, COMPAT_PREFIX_LEN) == 0) {
++				rec_type = MBR_REC_TYPE_USER;
++			} else if (memcmp(identifier, _group_compat_prefix, COMPAT_PREFIX_LEN) == 0) {
++				rec_type = MBR_REC_TYPE_GROUP;
++			} else {
++				membership_reply_with_error(message, ENOENT);
++				return;
++			}
++			memcpy(&id, (const uint8_t*) identifier + COMPAT_PREFIX_LEN, sizeof(id));
++			id = ntohl(id);
++			break;
++		default:
++			membership_reply_with_error(message, ENOENT);
++			return;
++	}
+ 
+-		FILE* logfile = fopen("/tmp/odd.log", "a");
+-		fprintf(logfile, "name = %s; pw = %p; id length = %zu; id = %*s", tmp_string, pw, identifier_size, (int)identifier_size, (const char*)identifier);
+-		fclose(logfile);
++	// then: the form it is wanted in
++	switch (target_type) {
++		case ID_TYPE_UUID: {
++			uuid_t uuid;
+ 
+-		if (!pw) {
+-			membership_reply_with_error(message, EINVAL);
++			build_uuid(rec_type == MBR_REC_TYPE_USER ? _user_compat_prefix : _group_compat_prefix, id, uuid);
++			membership_reply_with_identifier(message, uuid, sizeof(uuid), rec_type);
+ 			return;
+ 		}
+-
+-		uuid_t tmp_uuid;
+-
+-		build_uuid(_user_compat_prefix, pw->pw_uid, tmp_uuid);
+-
+-		xpc_object_t reply = xpc_dictionary_create_reply(message);
+-
+-		xpc_dictionary_set_data(reply, "identifier", tmp_uuid, sizeof(tmp_uuid));
+-		xpc_dictionary_set_int64(reply, "rectype", MBR_REC_TYPE_USER);
+-
+-		xpc_dictionary_set_int64(reply, OD_RPC_ERROR, 0);
+-		xpc_connection_send_message(xpc_dictionary_get_remote_connection(message), reply);
+-		xpc_release(reply);
+-	} else {
+-		membership_reply_with_error(message, ENOSYS);
++		case ID_TYPE_UID:
++		case ID_TYPE_GID:
++		case ID_TYPE_UID_OR_GID:
++			if ((target_type == ID_TYPE_UID && rec_type != MBR_REC_TYPE_USER) ||
++			    (target_type == ID_TYPE_GID && rec_type != MBR_REC_TYPE_GROUP)) {
++				membership_reply_with_error(message, ENOENT);
++				return;
++			}
++			membership_reply_with_identifier(message, &id, sizeof(id), rec_type);
++			return;
++		case ID_TYPE_USERNAME:
++		case ID_TYPE_GROUPNAME: {
++			const char* found = NULL;
++
++			if (target_type == ID_TYPE_USERNAME && rec_type == MBR_REC_TYPE_USER) {
++				struct passwd* pw = getpwuid(id);
++				found = pw ? pw->pw_name : NULL;
++			} else if (target_type == ID_TYPE_GROUPNAME && rec_type == MBR_REC_TYPE_GROUP) {
++				struct group* gr = getgrgid(id);
++				found = gr ? gr->gr_name : NULL;
++			}
++			if (!found) {
++				membership_reply_with_error(message, ENOENT);
++				return;
++			}
++			membership_reply_with_identifier(message, found, strlen(found) + 1, rec_type);
++			return;
++		}
++		default:
++			membership_reply_with_error(message, ENOENT);
++			return;
+ 	}
+ };
+ 

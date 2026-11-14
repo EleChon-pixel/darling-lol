@@ -65,6 +65,30 @@ class MacAccountDetailTests(unittest.TestCase):
                 (Path(folder) / relative).write_bytes(data)
             self.assertEqual(platform.mac_account_files(Path(folder)), {})
 
+    def test_group_file_gets_mac_system_groups(self):
+        platform = tool('configure-darling-platform')
+        with tempfile.TemporaryDirectory() as folder:
+            etc = Path(folder) / 'private/etc'
+            etc.mkdir(parents=True)
+            (etc / 'passwd').write_text('root:*:0:0:System Administrator:/var/root:/bin/sh\n'
+                                        'nobody-here:*:1000:1000:nobody-here:/Users/nobody-here:/bin/zsh\n'
+                                        '_trustd:*:282:282:trustd:/var/empty:/usr/bin/false\n')
+            (etc / 'group').write_text('wheel:*:0:root,nobody-here\n'
+                                       'nobody-here:*:1000:nobody-here\n'
+                                       '_trustd:*:282:_trustd\n')
+            files = platform.mac_account_files(Path(folder))
+            lines = files['private/etc/group'].decode().splitlines()
+            self.assertEqual(lines[:3], ['wheel:*:0:root,nobody-here', 'nobody-here:*:1000:nobody-here',
+                                         '_trustd:*:282:_trustd'])
+            self.assertEqual(sum(line.startswith('wheel:') for line in lines), 1)
+            self.assertIn('staff:*:20:root,nobody-here', lines)
+            self.assertIn('admin:*:80:root,nobody-here', lines)
+            self.assertIn('everyone:*:12:', lines)
+            self.assertIn('nobody:*:-2:', lines)
+            for relative, data in files.items():
+                (Path(folder) / relative).write_bytes(data)
+            self.assertEqual(platform.mac_account_files(Path(folder)), {})
+
     def test_prefix_gets_the_places_every_mac_has(self):
         platform = tool('configure-darling-platform')
         with tempfile.TemporaryDirectory() as folder:
