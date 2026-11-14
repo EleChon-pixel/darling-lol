@@ -40,7 +40,11 @@ identity() { # key -> value from the per-prefix runtime identity, empty when uns
  sed -n "s/^$1=//p" /private/etc/darling-runtime-identity.conf | head -n 1
 }
 
-displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
+# An Intel Mac's integrated GPU shares system memory; macOS reports its dynamic maximum
+# (a real Macmini8,1: "VRAM (Dynamic, Max): 1536 MB").
+INTEGRATED_VRAM_MB=1536
+
+displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus|shared (1: dynamic VRAM)
  # Same switch as the Metal device name: report the MacBookPro16,1 compatibility
  # GPU profile so system_profiler and Metal agree. This changes the reported
  # platform identity only; it does not change the host, the driver, or the GPU
@@ -63,7 +67,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  # however many the host has.
  if [ -n "$(identity gpu.integrated.name)" ] && [ -z "$(identity gpu.discrete.name)" ]; then
   integrated_vendor=$(identity gpu.integrated.vendor | sed 's/^0[xX]//' | tr 'A-F' 'a-f')
-  echo "${integrated_vendor:-8086}|$integrated_device||$integrated_name|builtin"
+  echo "${integrated_vendor:-8086}|$integrated_device|$INTEGRATED_VRAM_MB|$integrated_name|builtin|1"
   return
  fi
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
@@ -74,7 +78,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
    vram=$(awk '{ printf "%d", $1 / 1048576 }' "$card/device/mem_info_vram_total")
   fi
   name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
-  bus=builtin
+  bus=builtin; shared=
   if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
     1002|10de) vendor=$discrete_vendor; device=$discrete_device; name=$discrete_name
@@ -87,10 +91,10 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
                fi
                bus=pcie;;
     8086) vendor=8086; device=$integrated_device; name=$integrated_name
-          vram=; bus=builtin;;
+          vram=$INTEGRATED_VRAM_MB; shared=1; bus=builtin;;
    esac
   fi
-  echo "$vendor|$device|$vram|$name|$bus"
+  echo "$vendor|$device|$vram|$name|$bus|$shared"
  done
 }
 
@@ -190,14 +194,18 @@ if [ "$xml" = 1 ]; then
    SPHardwareDataType) hardware | overview_xml hardware_overview;;
    SPSoftwareDataType) software | overview_xml os_overview;;
    SPDisplaysDataType)
-    displays | while IFS='|' read -r vendor device vram name bus; do
+    displays | while IFS='|' read -r vendor device vram name bus shared; do
      name=$(printf '%s' "$name" | escape)
      echo '   <dict>'
      echo "    <key>_name</key><string>$name</string>"
      echo "    <key>spdisplays_bus</key><string>spdisplays_$bus</string>"
      echo "    <key>spdisplays_device-id</key><string>0x$device</string>"
      echo "    <key>spdisplays_vendor</key><string>${name%% *} (0x$vendor)</string>"
-     [ -z "$vram" ] || echo "    <key>spdisplays_vram</key><string>$vram MB</string>"
+     if [ -n "$vram" ] && [ "$shared" = 1 ]; then
+      echo "    <key>spdisplays_vram_shared</key><string>$vram MB</string>"
+     elif [ -n "$vram" ]; then
+      echo "    <key>spdisplays_vram</key><string>$vram MB</string>"
+     fi
      echo "    <key>sppci_model</key><string>$name</string>"
      echo '    <key>sppci_device_type</key><string>spdisplays_gpu</string>'
      echo '   </dict>'
@@ -236,10 +244,14 @@ for type in $types; do
   SPSoftwareDataType) software | overview_text Software 'System Software Overview';;
   SPDisplaysDataType)
    printf 'Graphics/Displays:\n\n'
-   displays | while IFS='|' read -r vendor device vram name bus; do
+   displays | while IFS='|' read -r vendor device vram name bus shared; do
     [ "$bus" = pcie ] && bus_text=PCIe || bus_text='Built-In'
     printf '    %s:\n\n      Chipset Model: %s\n      Type: GPU\n      Bus: %s\n' "$name" "$name" "$bus_text"
-    [ -z "$vram" ] || printf '      VRAM (Total): %s MB\n' "$vram"
+    if [ -n "$vram" ] && [ "$shared" = 1 ]; then
+     printf '      VRAM (Dynamic, Max): %s MB\n' "$vram"
+    elif [ -n "$vram" ]; then
+     printf '      VRAM (Total): %s MB\n' "$vram"
+    fi
     printf '      Vendor: %s (0x%s)\n      Device ID: 0x%s\n\n' "${name%% *}" "$vendor" "$device"
    done;;
   SPEthernetDataType)

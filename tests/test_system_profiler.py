@@ -110,10 +110,15 @@ class SystemProfilerTests(unittest.TestCase):
         self.assertIn('Device ID: 0x3e9b', mini)
         self.assertNotIn('AMD', mini)
         self.assertNotIn('NVIDIA', mini)
+        # As a real Macmini8,1 reports its UHD 630.
+        self.assertIn('      Bus: Built-In\n      VRAM (Dynamic, Max): 1536 MB\n', mini)
+        self.assertNotIn('VRAM (Total)', mini)
         laptop = self.displays_with('gpu.integrated.name=Intel UHD Graphics 630\n'
                                     'gpu.discrete.name=AMD Radeon Pro 5500M\n')
         self.assertEqual(laptop.count('Chipset Model:'), 2)
         self.assertIn('Chipset Model: AMD Radeon Pro 5500M', laptop)
+        self.assertIn('VRAM (Total): 4096 MB', laptop)
+        self.assertIn('VRAM (Dynamic, Max): 1536 MB', laptop)
 
     def test_listed_and_default_types(self):
         listed = self.run_profiler('-listDataTypes')
