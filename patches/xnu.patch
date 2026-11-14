@@ -3186,10 +3186,10 @@ index f890ab2..1c594cd 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
 new file mode 100644
-index 0000000..8472491
+index 0000000..850b6c0
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/guest_view.c
-@@ -0,0 +1,844 @@
+@@ -0,0 +1,845 @@
 +#include <darling/emulation/xnu_syscall/bsd/helper/misc/guest_view.h>
 +
 +#include <stddef.h>
@@ -3806,7 +3806,8 @@ index 0000000..8472491
 + */
 +long darling_attr_volume(const char* path, struct bsd_statfs64* s, const char** name, unsigned char* uuid)
 +{
-+	static const char* const names[] = { "VM", "Preboot", "Update", "Data" };
++	/* Not an array of pointers: dyld links this file statically and cannot relocate one. */
++	static const char names[][8] = { "VM", "Preboot", "Update", "Data" };
 +	char data[DARLING_RUNTIME_IDENTITY_MAX], value[64];
 +	long rv = sys_statfs64(path, s);
 +	long index = MAC_VOLUME_COUNT;
@@ -13666,7 +13667,7 @@ index b04390e..2157578 100644
  
  #endif // LINUX_GETATTRLISTBULK_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
-index cbfba07..369c7fc 100644
+index cbfba07..597b1ac 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/ioctl/ioctl.c
 @@ -13,9 +13,56 @@
@@ -13686,7 +13687,7 @@ index cbfba07..369c7fc 100644
 +
 +/* The kernel controls a macOS 14 kernel registers at boot, in a plausible order; IDs
 + * are handed out by registration order and differ between machines. */
-+static const char* const kernel_controls[] = {
++static const char kernel_controls[][40] = {
 +	"com.apple.flow-divert",
 +	"com.apple.net.netagent",
 +	"com.apple.content-filter",
