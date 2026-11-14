@@ -2118,7 +2118,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..f25f88f 100644
+index 206e92e..e347b8f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -6,6 +6,9 @@
@@ -2147,7 +2147,7 @@ index 206e92e..f25f88f 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -197,8 +205,267 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -197,8 +205,336 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  }
  
  
@@ -2167,7 +2167,10 @@ index 206e92e..f25f88f 100644
 + * only the features Skylake-family client CPUs have (no SHA, GFNI, VAES, PKU, hybrid,
 + * ...; masking only ever removes, so what remains is still truthful), its sub-leaves
 + * end at 0, and leaf 4 describes the profile's caches (hw.l1icachesize, hw.l1dcachesize,
-+ * hw.l2cachesize, hw.l3cachesize), the same ones sysctl reports.
++ * hw.l2cachesize, hw.l3cachesize), the same ones sysctl reports. With cpu.logical_count
++ * the topology is the profile's too: leaf 1 EBX (logical processor IDs, APIC ID), the
++ * sharing fields of leaf 4 and leaf 0xB; a Coffee Lake profile also gets that CPU's
++ * leaf 2 descriptors. Leaf 0xD stays the host's: XSAVE users size their buffers by it.
 + */
 +#define LINUX_ARCH_SET_CPUID 0x1012
 +#define LINUX_SI_KERNEL 0x80
@@ -2195,6 +2198,8 @@ index 206e92e..f25f88f 100644
 +	unsigned int base_mhz;
 +	unsigned int max_mhz;
 +	unsigned int max_leaf;
++	unsigned int logical; /* cpu.logical_count; 0: the host's topology is reported */
++	unsigned int threads; /* per core */
 +	unsigned int brand[12];
 +	struct cpuid_cache cache[4]; /* L1D, L1I, L2, L3; leaf 4 sub-leaf 4 and later: none */
 +};
@@ -2236,9 +2241,19 @@ index 206e92e..f25f88f 100644
 +	return true;
 +}
 +
++/* Intel numbers threads and cores in power-of-two ranges of APIC IDs. */
++static unsigned int id_range(unsigned int count)
++{
++	unsigned int range = 1;
++	while (range < count)
++		range <<= 1;
++	return range;
++}
++
 +static void cpuid_cache_setup(const char* data)
 +{
 +	unsigned long long threads = identity_number(data, "cpu.threads_per_core");
++	unsigned long long configured = identity_number(data, "cpu.logical_count");
 +	unsigned char mask[128];
 +	unsigned int logical = 0, cores;
 +	long got = LINUX_SYSCALL(__NR_sched_getaffinity, 0, sizeof(mask), mask);
@@ -2246,9 +2261,21 @@ index 206e92e..f25f88f 100644
 +	for (long i = 0; i < got; i++)
 +		for (unsigned int bit = mask[i]; bit; bit &= bit - 1)
 +			logical++;
-+	if (threads < 1 || threads > 8 || logical < threads)
-+		return;
-+	cores = logical / (unsigned int) threads;
++	if (threads >= 1 && threads <= 8 && configured >= threads && configured <= 128 && configured % threads == 0)
++	{
++		/* The profile's own topology: leaves 1, 4 and 0xB describe it, as a Mac's do. */
++		cpuid_identity.logical = logical = (unsigned int) configured;
++		cpuid_identity.threads = (unsigned int) threads;
++		cores = id_range(logical / (unsigned int) threads);
++		logical = cores * id_range((unsigned int) threads);
++		threads = id_range((unsigned int) threads);
++	}
++	else
++	{
++		if (threads < 1 || threads > 8 || logical < threads)
++			return;
++		cores = logical / (unsigned int) threads;
++	}
 +	if (cores > 64)
 +		cores = 64;
 +	cpuid_identity.caches =
@@ -2313,6 +2340,17 @@ index 206e92e..f25f88f 100644
 +	cpuid_identity.faulting = LINUX_SYSCALL(__NR_arch_prctl, LINUX_ARCH_SET_CPUID, 0) == 0;
 +}
 +
++/* The APIC ID of the profile's processor this thread runs on: core number, then thread. */
++static unsigned int cpuid_apic_id(void)
++{
++	unsigned int cpu = 0;
++
++	if (LINUX_SYSCALL(__NR_getcpu, &cpu, 0, 0) != 0)
++		cpu = 0;
++	cpu %= cpuid_identity.logical;
++	return ((cpu / cpuid_identity.threads) * id_range(cpuid_identity.threads)) | (cpu % cpuid_identity.threads);
++}
++
 +static bool emulate_cpuid(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 +{
 +	unsigned char insn[2];
@@ -2346,6 +2384,37 @@ index 206e92e..f25f88f 100644
 +		break;
 +	case 1:
 +		a = cpuid_identity.signature;
++		if (cpuid_identity.logical)
++			b = (b & 0xFFFFu) | ((id_range(cpuid_identity.logical / cpuid_identity.threads) * id_range(cpuid_identity.threads)) << 16) |
++				(cpuid_apic_id() << 24);
++		break;
++	case 2:
++		/* Cache and TLB descriptors of Coffee Lake (06_9E), from a Macmini8,1. */
++		if ((cpuid_identity.signature & 0x0FFF0FF0u) == 0x000906E0u)
++		{
++			a = 0x76036301u; b = 0x00F0B5FFu; c = 0; d = 0x00C30000u;
++		}
++		break;
++	case 0xb:
++		if (cpuid_identity.logical)
++		{
++			unsigned int thread_bits = 0, package_bits = 0;
++			while ((1u << thread_bits) < cpuid_identity.threads)
++				thread_bits++;
++			while ((1u << package_bits) < id_range(cpuid_identity.logical / cpuid_identity.threads) * id_range(cpuid_identity.threads))
++				package_bits++;
++			a = b = 0;
++			c = subleaf & 0xFFu;
++			if (subleaf == 0)
++			{
++				a = thread_bits; b = cpuid_identity.threads; c |= 1u << 8; /* SMT level */
++			}
++			else if (subleaf == 1)
++			{
++				a = package_bits; b = cpuid_identity.logical; c |= 2u << 8; /* core level */
++			}
++			d = cpuid_apic_id();
++		}
 +		break;
 +	case 4:
 +		if (cpuid_identity.caches)
@@ -2415,7 +2484,7 @@ index 206e92e..f25f88f 100644
  	am_i_ptraced = true;
  
  	__simple_kprintf("darling_sigexc_self()\n");
-@@ -267,13 +534,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +603,170 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -2587,7 +2656,7 @@ index 206e92e..f25f88f 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +783,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +852,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -3880,7 +3949,7 @@ index 0000000..13c450a
 +	return total;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..7bf349f 100644
+index f273989..5e3e171 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,9 @@
@@ -3901,11 +3970,12 @@ index f273989..7bf349f 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +28,28 @@ enum {
+@@ -24,10 +28,30 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
 -	_HW_CPUFREQUENCY = 15,
++	_HW_PACKAGES,
 +	_HW_CPUFREQUENCY_COMPAT = 15,
 +	_HW_CPUFREQUENCY = 1500,
 +	_HW_CACHECONFIG = 1200,
@@ -3927,11 +3997,12 @@ index f273989..7bf349f 100644
  };
  
  static sysctl_handler(handle_availcpu);
++static sysctl_handler(handle_packages);
 +static sysctl_handler(handle_ncpu);
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +61,84 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +63,84 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -4017,8 +4088,11 @@ index f273989..7bf349f 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +150,25 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -53,9 +150,28 @@ const struct known_sysctl sysctls_hw[] = {
+ 	{ .oid = _HW_CPUTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputype", .handler = handle_cputype },
+ 	{ .oid = _HW_CPUSUBTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cpusubtype", .handler = handle_cpusubtype },
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
++	{ .oid = _HW_PACKAGES, .type = CTLTYPE_INT, .exttype = "I", .name = "packages", .handler = handle_packages },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
 -	{ .oid = _HW_CPUFREQUENCY, .type = CTLTYPE_INT, .exttype = "", .name = "cpufrequency", .handler = handle_cpufrequency },
@@ -4044,7 +4118,7 @@ index f273989..7bf349f 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +184,62 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +187,62 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -4107,7 +4181,7 @@ index f273989..7bf349f 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +252,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +255,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -4121,7 +4195,7 @@ index f273989..7bf349f 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +345,58 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +348,58 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -4187,7 +4261,19 @@ index f273989..7bf349f 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +411,194 @@ sysctl_handler(handle_machine)
+@@ -188,8 +409,206 @@ sysctl_handler(handle_cpu64bitcapable)
+ 	return 0;
+ }
+ 
++sysctl_handler(handle_packages)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1; // every Mac has one processor package
++	return 0;
++}
++
+ sysctl_handler(handle_machine)
+ {
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4383,7 +4469,7 @@ index f273989..7bf349f 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..628ec13 100644
+index bd9cdc2..07232d5 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 @@ -13,6 +13,7 @@
@@ -4424,7 +4510,21 @@ index bd9cdc2..628ec13 100644
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
-@@ -139,18 +149,23 @@ sysctl_handler(handle_boottime)
+@@ -106,8 +116,11 @@ sysctl_handler(handle_msgbuf)
+ 
+ sysctl_handler(handle_proc)
+ {
+-	if (nlen < 4)
+-		return -ENOENT;
++	/* As in XNU: only KERN_PROC_ALL may leave out its argument. */
++	if (nlen == 3 && name[2] == KERN_PROC_ALL)
++		return _sysctl_proc(KERN_PROC_ALL, 0, (struct kinfo_proc*) old, oldlen);
++	if (nlen != 4)
++		return -EINVAL;
+ 	return _sysctl_proc(name[2], name[3], (struct kinfo_proc*) old, oldlen);
+ }
+ 
+@@ -139,18 +152,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -4454,7 +4554,7 @@ index bd9cdc2..628ec13 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -188,7 +203,9 @@ sysctl_handler(handle_version)
+@@ -188,7 +206,9 @@ sysctl_handler(handle_version)
  
  sysctl_handler(handle_osversion)
  {
@@ -4465,7 +4565,7 @@ index bd9cdc2..628ec13 100644
  
  	copyout_string(s, (char*) old, oldlen);
  	return 0;
-@@ -327,7 +344,9 @@ sysctl_handler(handle_usrstack64)
+@@ -327,7 +347,9 @@ sysctl_handler(handle_usrstack64)
  }
  
  static sysctl_handler(handle_osproductversion) {
@@ -4476,7 +4576,7 @@ index bd9cdc2..628ec13 100644
  	return 0;
  };
  
-@@ -342,3 +361,56 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +364,56 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -11424,7 +11524,7 @@ index 0000000..f185f6c
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
-index 6600da7..9e87266 100644
+index 6600da7..168a29f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 @@ -31,6 +31,7 @@ struct kinfo_proc_chain
@@ -11435,13 +11535,52 @@ index 6600da7..9e87266 100644
  
  extern void free(void* ptr);
  extern void* malloc(__SIZE_TYPE__ len);
-@@ -97,6 +98,47 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+@@ -53,11 +54,31 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+ 	if (*buflen > 0 && out == NULL)
+ 		return -EFAULT;
+ 
+-	fd = sys_open_nocancel("/proc", BSD_O_RDONLY | BSD_O_DIRECTORY, 0);
+-	if (fd < 0)
+-		return fd;
++	if (what == KERN_PROC_PID)
++	{
++		/* One process is looked up directly; debugger checks ask for it constantly. */
++		char pid_name[16];
++
++		fd = -1;
++		if (flag > 0)
++		{
++			__simple_sprintf(pid_name, "%d", flag);
++			first = last = load_proc(pid_name, what, flag);
++			if (first != NULL)
++			{
++				first->next = NULL;
++				nproc++;
++			}
++		}
++	}
++	else
++	{
++		fd = sys_open_nocancel("/proc", BSD_O_RDONLY | BSD_O_DIRECTORY, 0);
++		if (fd < 0)
++			return fd;
++	}
+ 
+-	while ((ret = sys_getdirentries(fd, (char*) dents, sizeof(dents), &basep)) > 0)
++	while (fd >= 0 && (ret = sys_getdirentries(fd, (char*) dents, sizeof(dents), &basep)) > 0)
+ 	{
+ 		int pos = 0;
+ 		
+@@ -97,6 +118,50 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
  		}
  	}
  
 +	struct darling_mac_process_listing listing;
-+	darling_mac_process_listing_begin(&listing);
-+	for (int i = 0; i < darling_mac_process_count(); i++)
++	if (what == KERN_PROC_PID && first != NULL)
++		memset(&listing, 0, sizeof(listing));
++	else
++		darling_mac_process_listing_begin(&listing);
++	for (int i = 0; i < darling_mac_process_count() && !(what == KERN_PROC_PID && first != NULL); i++)
 +	{
 +		const struct darling_mac_process* mac = darling_mac_process_listed(&listing, i);
 +		struct kinfo_proc_chain* cur;
@@ -11483,7 +11622,17 @@ index 6600da7..9e87266 100644
  	if (*buflen < nproc*sizeof(struct kinfo_proc))
  	{
  		*buflen = nproc*sizeof(struct kinfo_proc);
-@@ -215,7 +257,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+@@ -118,7 +183,8 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+ 	}
+ 
+ 	free_chain(first);
+-	close_internal(fd);
++	if (fd >= 0)
++		close_internal(fd);
+ 
+ 	// __simple_printf("sysctl_proc returning %d, len %d\n", ret, *buflen);
+ 	return ret;
+@@ -215,7 +281,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
  
  	// comm
  	READELEM();
@@ -11494,7 +11643,7 @@ index 6600da7..9e87266 100644
  
  	// process state
  	READELEM();
-@@ -342,6 +386,10 @@ int _sysctl_procargs(int pid, char* buf, unsigned long* buflen)
+@@ -342,6 +410,10 @@ int _sysctl_procargs(int pid, char* buf, unsigned long* buflen)
  	int argc = 0, i, arg0len = 0, argslen = 0;
  	int totallen, ret = 0;
  
@@ -12583,3 +12732,51 @@ index 0000000..a1860b5
 +	put_hex(&l, d);
 +	finish(&l);
 +}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+index 0a7e492..96855e6 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+@@ -36,6 +36,7 @@ static inline void round_to_4(unsigned short* reclen)
+ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ {
+ 	int ret, bpos = 0, opos = 0;
++	long long next_offset = 0;
+ 
+ 	unsigned int max_entry_count = len / BSD_DIRENT_MIN_SIZE;
+ 
+@@ -76,8 +77,13 @@ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ 
+ 		opos += bsd->d_reclen;
+ 		bpos += l64->d_reclen;
++		next_offset = l64->d_off;
+ 	}
+ 
++	/* Entries the caller's buffer had no room for are read again by the next call. */
++	if (bpos < ret && bpos > 0)
++		LINUX_SYSCALL(__NR_lseek, fd, next_offset, LINUX_SEEK_SET);
++
+ 	return opos;
+ }
+ 
+@@ -86,6 +92,7 @@ struct dirent64 __DARWIN_STRUCT_DIRENTRY;
+ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ {
+ 	int ret, bpos = 0, opos = 0;
++	long long next_offset = 0;
+ 
+ 	unsigned int max_entry_count = len / BSD_DIRENT64_MIN_SIZE;
+ 
+@@ -127,8 +134,13 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ 
+ 		opos += bsd->d_reclen;
+ 		bpos += l64->d_reclen;
++		next_offset = l64->d_off;
+ 	}
+ 
++	/* Entries the caller's buffer had no room for are read again by the next call. */
++	if (bpos < ret && bpos > 0)
++		LINUX_SYSCALL(__NR_lseek, fd, next_offset, LINUX_SEEK_SET);
++
+ 	/*
+ 	if (bpos < ret) {
+ 		__simple_printf("bpos < ret; %d < %d", bpos, ret);
