@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..3861672 100644
+index 5b2e765..88b0c77 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -93,7 +93,15 @@ index 5b2e765..3861672 100644
  	src/xnu_syscall/bsd/impl/mman/madvise.c
  	src/xnu_syscall/bsd/impl/mman/mman.c
  	src/xnu_syscall/bsd/impl/mman/msync.c
-@@ -359,6 +364,11 @@ set(emulation_sources
+@@ -169,6 +174,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/network/accept.c
+ 	src/xnu_syscall/bsd/impl/network/bind.c
+ 	src/xnu_syscall/bsd/impl/network/connect.c
++	src/xnu_syscall/bsd/impl/network/netsrc.c
+ 	src/xnu_syscall/bsd/impl/network/getpeername.c
+ 	src/xnu_syscall/bsd/impl/network/getsockname.c
+ 	src/xnu_syscall/bsd/impl/network/getsockopt.c
+@@ -359,6 +365,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -5379,7 +5387,7 @@ index 4319355..6186a48 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..c01762f 100644
+index 8fabdda..22c1c8e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 @@ -11,17 +11,25 @@
@@ -5418,7 +5426,7 @@ index 8fabdda..c01762f 100644
  
  struct linux_ifconf {
  	int lifc_len;
-@@ -88,10 +97,256 @@ const struct known_sysctl sysctls_net[] = {
+@@ -88,10 +97,293 @@ const struct known_sysctl sysctls_net[] = {
  	{ .oid = -1 },
  };
  
@@ -5591,6 +5599,43 @@ index 8fabdda..c01762f 100644
 +	return found;
 +}
 +
++/* darling-lol (netsrc.c): the index the guest's interface list (do_iflist) gives the host
++ * interface holding IPv4 address `addr` (network byte order), or en0's when none does. */
++unsigned int darling_guest_ifindex_for_ipv4(uint32_t addr) {
++	char buf[IFC_MAX_INTERFACES * sizeof(struct linux_ifreq)];
++	char names[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++	char mac[IFC_MAX_INTERFACES][LINUX_IFNAMSIZ];
++	struct linux_ifconf lifc = { .lifc_len = sizeof(buf), .lifc_buf = buf };
++	bool rename = mac_interface_names();
++	unsigned int shown = 0, en0 = 0, found = 0;
++	int sock, count;
++
++	if ((sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
++		return 0;
++	if (host_interfaces(sock, &lifc) >= 0) {
++		count = lifc.lifc_len / sizeof(struct linux_ifreq);
++		for (int i = 0; i < count; i++)
++			strlcpy(names[i], lifc.lifc_req[i].lifr_name, LINUX_IFNAMSIZ);
++		if (rename)
++			assign_mac_names((const char (*)[LINUX_IFNAMSIZ]) names, count, mac);
++		for (int i = 0; i < count; i++) {
++			const char* shown_name = rename ? mac[i] : names[i];
++			const struct linux_sockaddr* sa = &lifc.lifc_req[i].lifr_addr;
++			uint32_t have;
++			if (shown_name[0] == '\0')
++				continue;
++			shown++;
++			if (!en0 && strncmp(shown_name, "en0", LINUX_IFNAMSIZ) == 0)
++				en0 = shown;
++			__builtin_memcpy(&have, sa->sa_data + 2, sizeof(have));
++			if (!found && addr != 0 && sa->sa_family == 2 && have == addr)
++				found = shown;
++		}
++	}
++	close_internal(sock);
++	return found ? found : en0;
++}
++
  static unsigned long round_up_sizeof_u32(unsigned long number) {
  	return (number + (sizeof(uint32_t) - 1)) & ~(sizeof(uint32_t) - 1);
  }
@@ -5675,7 +5720,7 @@ index 8fabdda..c01762f 100644
  static int do_iflist(void* old, unsigned long* oldlen) {
  	// we only do IPv4 addresses for now
  	int tmp_sock;
-@@ -107,19 +362,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -107,19 +399,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  	if ((status = tmp_sock = sys_socket(AF_INET, SOCK_DGRAM, 0)) < 0)
  		goto out;
  
@@ -5716,7 +5761,7 @@ index 8fabdda..c01762f 100644
  
  		if (old && *oldlen >= total_len + ifm_length) {
  			struct if_msghdr* ifm = (void*)old_ptr;
-@@ -142,13 +415,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -142,13 +452,34 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  			dl->sdl_alen = MAC_LENGTH;
  			dl->sdl_slen = 0; // ???
  
@@ -5752,7 +5797,7 @@ index 8fabdda..c01762f 100644
  
  			old_ptr += ifm_length;
  		}
-@@ -188,6 +482,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -188,6 +519,10 @@ static int do_iflist(void* old, unsigned long* oldlen) {
  		total_len += ifam_length;
  	}
  
@@ -13901,16 +13946,31 @@ index cbfba07..597b1ac 100644
  	IOCTL_STEP(handle_socket(fd, cmd, arg, &retval));
  	IOCTL_STEP(handle_termios(fd, cmd, arg, &retval));
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
-index 4e5aba4..8eacb44 100644
+index 4e5aba4..14483ff 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/connect.c
-@@ -33,6 +33,10 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
+@@ -8,6 +8,7 @@
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/network/netsrc.h>
+ 
+ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+ extern __SIZE_TYPE__ strlen(const char* src);
+@@ -33,6 +34,17 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
  	if (socklen > 512)
  		return -EINVAL;
  
-+	/* A kernel control address (AF_SYSTEM): see socket.c. */
++	/* A kernel control address (AF_SYSTEM): see socket.c. struct sockaddr_ctl carries the
++	 * control's id at offset 4. netsrc, which XNU registers unprivileged, answers
++	 * (netsrc.c); the other controls refuse as for a process without privilege. */
 +	if (name != NULL && socklen >= 2 && ((const unsigned char*) name)[1] == 32)
++	{
++		const unsigned char* ctl = name;
++		if (socklen >= 12 && (ctl[4] | ctl[5] << 8 | ctl[6] << 16 | (unsigned) ctl[7] << 24) == DARLING_NETSRC_CTL_ID)
++			return darling_netsrc_connect(fd);
 +		return -EPERM;
++	}
 +
  	fixed = __builtin_alloca(sockaddr_fixup_size_from_bsd(name, socklen));
  	ret = socklen = sockaddr_fixup_from_bsd(fixed, name, socklen);
@@ -14093,3 +14153,360 @@ index 4d1f437..bdcd5bc 100644
 +{
 +	MAC_DEVICE_FIELDS(st);
 +}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/netsrc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/netsrc.c
+new file mode 100644
+index 0000000..50b7880
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/netsrc.c
+@@ -0,0 +1,309 @@
++/*
++ * darling-lol: the com.apple.netsrc kernel control. Libinfo's getaddrinfo asks it, for
++ * each destination, which source address and interface the system would use and the
++ * RFC 6724 label and precedence of both (si_compare.c). XNU registers it without
++ * CTL_FLAG_PRIVILEGED (bsd/net/netsrc.c), so any process may connect.
++ *
++ * A PF_SYSTEM socket is a local datagram socket here (socket.c). Connecting it to
++ * netsrc gives it a private abstract name; a request sent on it is answered from the
++ * host's routing (the source a connected UDP socket gets) and the reply is queued on
++ * the socket itself, so recv() reads it as it would from the kernel.
++ */
++#include <darling/emulation/xnu_syscall/bsd/impl/network/netsrc.h>
++
++#include <stddef.h>
++#include <stdint.h>
++#include <sys/errno.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++unsigned int darling_guest_ifindex_for_ipv4(uint32_t addr);
++
++#define LINUX_AF_UNIX 1
++#define LINUX_AF_INET 2
++#define LINUX_AF_INET6 10
++#define LINUX_SOCK_DGRAM 2
++#define LINUX_SOCK_CLOEXEC 02000000
++#define BSD_AF_INET 2
++#define BSD_AF_INET6 30
++
++#define NETSRC_REQ_SIZE 36   /* struct netsrc_req */
++#define NETSRC_REPV1_SIZE 40 /* struct netsrc_repv1 */
++#define NETSRC_REPV2_SIZE 56 /* struct netsrc_repv2 */
++#define NETSRC_FLAG_ROUTEABLE 0x20
++#define NETSRC_FLAG_DIRECT 0x40
++
++struct linux_sockaddr_un
++{
++	unsigned short family;
++	char path[108];
++};
++
++static const char tag[] = "darling-netsrc.";
++
++/* Sockets connected to netsrc in this process: a quick filter so that other sends do
++ * not pay a getsockname (a descriptor reused after close is caught by the name). */
++static uint64_t marked[64];
++
++static void mark(int fd)
++{
++	if (fd >= 0 && fd < 64 * 64)
++		__atomic_fetch_or(&marked[fd / 64], 1ull << (fd % 64), __ATOMIC_RELAXED);
++}
++
++static bool maybe_marked(int fd)
++{
++	if (fd < 0)
++		return false;
++	if (fd >= 64 * 64)
++		return true;
++	return (__atomic_load_n(&marked[fd / 64], __ATOMIC_RELAXED) >> (fd % 64)) & 1;
++}
++
++static unsigned int put_decimal(char* out, unsigned long value)
++{
++	char digits[24];
++	unsigned int n = 0, k = 0;
++
++	do
++		digits[n++] = (char) ('0' + value % 10);
++	while ((value /= 10) != 0);
++	while (n > 0)
++		out[k++] = digits[--n];
++	return k;
++}
++
++long darling_netsrc_connect(int fd)
++{
++	static unsigned long serial;
++	struct linux_sockaddr_un sun;
++	long pid = LINUX_SYSCALL0(__NR_getpid);
++	long ret = -EADDRINUSE;
++
++	for (int attempt = 0; attempt < 8 && ret == -EADDRINUSE; attempt++)
++	{
++		unsigned int n = 1;
++
++		sun.family = LINUX_AF_UNIX;
++		sun.path[0] = '\0';
++		for (unsigned int i = 0; i < sizeof(tag) - 1; i++)
++			sun.path[n++] = tag[i];
++		n += put_decimal(sun.path + n, (unsigned long) pid);
++		sun.path[n++] = '.';
++		n += put_decimal(sun.path + n, __atomic_fetch_add(&serial, 1, __ATOMIC_RELAXED));
++		ret = LINUX_SYSCALL(__NR_bind, fd, &sun, sizeof(sun.family) + n);
++	}
++	if (ret == -EINVAL)
++		return -EISCONN; /* already connected (named) */
++	if (ret < 0)
++		return errno_linux_to_bsd(ret);
++	mark(fd);
++	return 0;
++}
++
++static bool own_name(int fd, struct linux_sockaddr_un* sun, int* length)
++{
++	*length = sizeof(*sun);
++	if (LINUX_SYSCALL(__NR_getsockname, fd, sun, length) < 0 || sun->family != LINUX_AF_UNIX)
++		return false;
++	if (*length < (int) (sizeof(sun->family) + sizeof(tag)) || sun->path[0] != '\0')
++		return false;
++	for (unsigned int i = 0; i < sizeof(tag) - 1; i++)
++	{
++		if (sun->path[1 + i] != tag[i])
++			return false;
++	}
++	return true;
++}
++
++bool darling_netsrc_socket(int fd)
++{
++	struct linux_sockaddr_un sun;
++	int length;
++
++	return maybe_marked(fd) && own_name(fd, &sun, &length);
++}
++
++/* XNU's default address-selection policy (bsd/netinet6/in6_src.c, RFC 6724). */
++static void policy(const unsigned char addr[16], uint16_t* label, uint16_t* precedence)
++{
++	static const struct { unsigned char prefix[16]; unsigned char bits; unsigned char preced, label; } table[] = {
++		{ { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 }, 128, 50, 0 },          /* ::1/128 */
++		{ { 0,0,0,0, 0,0,0,0, 0,0,0xff,0xff, 0,0,0,0 }, 96, 35, 4 },     /* ::ffff:0:0/96 */
++		{ { 0x20,0x02 }, 16, 30, 2 },                                    /* 2002::/16 */
++		{ { 0x20,0x01,0,0 }, 32, 5, 5 },                                 /* 2001::/32 */
++		{ { 0xfc }, 7, 3, 13 },                                          /* fc00::/7 */
++		{ { 0 }, 96, 1, 3 },                                             /* ::/96 */
++		{ { 0xfe,0xc0 }, 10, 1, 11 },                                    /* fec0::/10 */
++		{ { 0x3f,0xfe }, 16, 1, 12 },                                    /* 3ffe::/16 */
++		{ { 0 }, 0, 40, 1 },                                             /* ::/0 */
++	};
++	int best = -1;
++
++	for (int i = 0; i < (int) (sizeof(table) / sizeof(table[0])); i++)
++	{
++		bool match = true;
++		for (int bit = 0; bit < table[i].bits && match; bit++)
++		{
++			unsigned char m = (unsigned char) (0x80 >> (bit % 8));
++			match = (addr[bit / 8] & m) == (table[i].prefix[bit / 8] & m);
++		}
++		if (match && (best < 0 || table[i].bits > table[best].bits))
++			best = i;
++	}
++	*label = table[best].label;
++	*precedence = table[best].preced;
++}
++
++static void mapped(const unsigned char v4[4], unsigned char out[16])
++{
++	for (int i = 0; i < 16; i++)
++		out[i] = 0;
++	out[10] = out[11] = 0xff;
++	for (int i = 0; i < 4; i++)
++		out[12 + i] = v4[i];
++}
++
++static void put16(unsigned char* p, uint16_t v) { p[0] = (unsigned char) v; p[1] = (unsigned char) (v >> 8); }
++static void put32(unsigned char* p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (unsigned char) (v >> (8 * i)); }
++
++long darling_netsrc_send(int fd, const void* buffer, unsigned long length)
++{
++	const unsigned char* req = buffer;
++	unsigned char reply[NETSRC_REPV2_SIZE] = { 0 };
++	unsigned char dst6[16], src6[16];
++	unsigned char lsa[28] = { 0 }, lsrc[28] = { 0 };
++	struct linux_sockaddr_un self;
++	int self_length, lsrc_length = sizeof(lsrc);
++	uint32_t version, flags = 0;
++	uint16_t label, precedence, dstlabel, dstprecedence;
++	unsigned int ifindex = 0;
++	bool v6, routed = false, loopback;
++	long s, ret;
++
++	if (buffer == NULL || length < NETSRC_REQ_SIZE)
++		return -EINVAL;
++	if (!own_name(fd, &self, &self_length))
++		return -ENOTCONN;
++	version = req[0] | req[1] << 8 | req[2] << 16 | (uint32_t) req[3] << 24;
++	if (version > 2)
++		return -EINVAL;
++
++	/* nrq_dst at offset 8: a BSD sockaddr_in or sockaddr_in6 */
++	const unsigned char* dst = req + 8;
++	if (dst[1] == BSD_AF_INET)
++	{
++		if (dst[0] < 16 || (dst[4] | dst[5] | dst[6] | dst[7]) == 0)
++			return -EINVAL;
++		v6 = false;
++		mapped(dst + 4, dst6);
++		lsa[0] = LINUX_AF_INET;
++		lsa[2] = dst[2]; lsa[3] = dst[3];
++		for (int i = 0; i < 4; i++)
++			lsa[4 + i] = dst[4 + i];
++		loopback = dst[4] == 127;
++	}
++	else if (dst[1] == BSD_AF_INET6)
++	{
++		bool zero = true;
++		if (dst[0] < 28)
++			return -EINVAL;
++		for (int i = 0; i < 16; i++)
++		{
++			dst6[i] = dst[8 + i];
++			zero &= dst6[i] == 0;
++		}
++		if (zero)
++			return -EINVAL;
++		v6 = true;
++		lsa[0] = LINUX_AF_INET6 & 0xff;
++		lsa[2] = dst[2]; lsa[3] = dst[3];
++		for (int i = 0; i < 4; i++)
++			lsa[4 + i] = dst[4 + i];   /* flowinfo */
++		for (int i = 0; i < 16; i++)
++			lsa[8 + i] = dst6[i];
++		for (int i = 0; i < 4; i++)
++			lsa[24 + i] = dst[24 + i]; /* scope id */
++		loopback = true;
++		for (int i = 0; i < 15; i++)
++			loopback &= dst6[i] == 0;
++		loopback &= dst6[15] == 1;
++	}
++	else
++		return -EINVAL;
++	if (lsa[2] == 0 && lsa[3] == 0)
++		lsa[3] = 9; /* a UDP connect needs a port; nothing is sent */
++
++	/* The source the host would use: what a connected UDP socket is bound to. */
++	s = LINUX_SYSCALL(__NR_socket, v6 ? LINUX_AF_INET6 : LINUX_AF_INET, LINUX_SOCK_DGRAM | LINUX_SOCK_CLOEXEC, 0);
++	if (s >= 0)
++	{
++		if (LINUX_SYSCALL(__NR_connect, s, lsa, v6 ? 28 : 16) == 0 &&
++			LINUX_SYSCALL(__NR_getsockname, s, lsrc, &lsrc_length) == 0)
++			routed = true;
++		LINUX_SYSCALL(__NR_close, s);
++	}
++
++	if (routed && !v6)
++	{
++		uint32_t a = lsrc[4] | lsrc[5] << 8 | lsrc[6] << 16 | (uint32_t) lsrc[7] << 24;
++		reply[0] = 16;
++		reply[1] = BSD_AF_INET;
++		for (int i = 0; i < 4; i++)
++			reply[4 + i] = lsrc[4 + i];
++		mapped(lsrc + 4, src6);
++		ifindex = darling_guest_ifindex_for_ipv4(a);
++	}
++	else if (routed)
++	{
++		bool linklocal = lsrc[8] == 0xfe && (lsrc[9] & 0xc0) == 0x80;
++		reply[0] = 28;
++		reply[1] = BSD_AF_INET6;
++		for (int i = 0; i < 16; i++)
++			reply[8 + i] = src6[i] = lsrc[8 + i];
++		ifindex = darling_guest_ifindex_for_ipv4(loopback ? 0x0100007fu : 0);
++		if (linklocal)
++			put32(reply + 24, ifindex);
++	}
++	if (routed)
++		flags |= NETSRC_FLAG_ROUTEABLE;
++	if (routed && loopback)
++		flags |= NETSRC_FLAG_DIRECT; /* a local route */
++
++	policy(dst6, &dstlabel, &dstprecedence);
++	if (routed)
++		policy(src6, &label, &precedence);
++	else
++		label = precedence = 0;
++
++	if (version == 1)
++	{
++		if (!routed)
++			return -EHOSTUNREACH;
++		/* netsrc_repv1: nrp_src, then u16 flags, label, precedence, dstlabel, dstprecedence */
++		put16(reply + 28, 0);
++		put16(reply + 30, label);
++		put16(reply + 32, precedence);
++		put16(reply + 34, dstlabel);
++		put16(reply + 36, dstprecedence);
++		put16(reply + 38, 0);
++	}
++	else
++	{
++		/* netsrc_repv2: nrp_src, min_rtt, attempts, successes, u32 flags, then u16 label,
++		 * precedence, dstlabel, dstprecedence, ifindex */
++		put32(reply + 40, flags);
++		put16(reply + 44, label);
++		put16(reply + 46, precedence);
++		put16(reply + 48, dstlabel);
++		put16(reply + 50, dstprecedence);
++		put16(reply + 52, (uint16_t) ifindex);
++	}
++	ret = LINUX_SYSCALL(__NR_sendto, fd, reply, version == 1 ? NETSRC_REPV1_SIZE : NETSRC_REPV2_SIZE, 0,
++		&self, self_length);
++	if (ret < 0)
++		return errno_linux_to_bsd(ret);
++	return (long) length;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/netsrc.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/netsrc.h
+new file mode 100644
+index 0000000..97c91fe
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/netsrc.h
+@@ -0,0 +1,13 @@
++#ifndef DARLING_EMULATION_NETWORK_NETSRC_H
++#define DARLING_EMULATION_NETWORK_NETSRC_H
++
++#include <stdbool.h>
++
++/* The com.apple.netsrc kernel control (getaddrinfo's source-address selection). */
++#define DARLING_NETSRC_CTL_ID 6
++
++long darling_netsrc_connect(int fd);
++bool darling_netsrc_socket(int fd);
++long darling_netsrc_send(int fd, const void* buffer, unsigned long length);
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
+index 820a7eb..d0c8c88 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
+@@ -9,6 +9,7 @@
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/network/netsrc.h>
+ 
+ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+ 
+@@ -29,6 +30,10 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
+ 	if (socklen > 512)
+ 		return -EINVAL;
+ 
++	/* A request on a socket connected to the netsrc kernel control (netsrc.c). */
++	if (sockaddr == NULL && length >= 36 && length <= 64 && darling_netsrc_socket(fd))
++		return darling_netsrc_send(fd, buffer, length);
++
+ 	if (sockaddr != NULL) {
+ 		fixed = __builtin_alloca(sockaddr_fixup_size_from_bsd(sockaddr, socklen));
+ 		ret = socklen = sockaddr_fixup_from_bsd(fixed, sockaddr, socklen);
